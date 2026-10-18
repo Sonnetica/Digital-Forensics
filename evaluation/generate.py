@@ -12,10 +12,10 @@ from itertools import combinations
 from pathlib import Path
 
 RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
-TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160)}
+TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
 
 
-def generate(output, tier="simple", seed=47, noise=None):
+def generate(output, tier="simple", seed=47, noise=None, start=None):
     output = Path(output).expanduser().resolve()
     repository = Path(__file__).resolve().parent.parent
     if output.is_relative_to(repository):
@@ -28,7 +28,10 @@ def generate(output, tier="simple", seed=47, noise=None):
     if not 0 <= noise <= 100000:
         raise ValueError("Noise count must be between 0 and 100000.")
     rng = random.Random(seed)
-    base = datetime(2026, 10, 1, 8, tzinfo=UTC)
+    base = datetime.fromisoformat(start) if start else datetime(2026, 10, 1, 8, tzinfo=UTC)
+    if base.utcoffset() is None:
+        raise ValueError("Scenario start must include a UTC offset.")
+    base = base.astimezone(UTC)
     manifest, aliases, expected = {}, {}, {rule: set() for rule in RULES}
     scenarios = []
     counter = 0
@@ -221,6 +224,102 @@ def generate(output, tier="simple", seed=47, noise=None):
         ]
         scenarios.append({"name": "query order and fragments stay distinct", "files": names})
 
+    if tier == "challenge":
+        # Intent labels come from scenario roles, independently of rule matches.
+        benign = [
+            emit(
+                f"independent-{i}",
+                subject="Community bulletin",
+                body="https://community.example/news",
+                when=base + timedelta(minutes=i),
+            )
+            for i in range(3)
+        ]
+        pairs("url_reuse", benign)
+        scenarios.append(
+            {
+                "name": "Independent readers share a common bulletin; no joint distribution plan",
+                "files": benign,
+                "coordinated_distribution": False,
+            }
+        )
+        threaded = []
+        for i in range(3):
+            name = emit(
+                f"planned-thread-{i}",
+                subject="Planned release",
+                body="https://release.example/a",
+                attachment=b"Planned shared release",
+                when=base + timedelta(hours=3, minutes=i),
+                parent=f"<planned-thread-{i - 1}.{seed}@evidence.example>" if i else None,
+            )
+            if threaded:
+                expected["reply"].add((threaded[-1], name))
+            threaded.append(name)
+        for rule in ("attachment_reuse", "url_reuse", "possible_coordination"):
+            pairs(rule, threaded)
+        scenarios.append(
+            {
+                "name": "Actors deliberately distribute one payload while using reply headers",
+                "files": threaded,
+                "coordinated_distribution": True,
+            }
+        )
+        personalized = [
+            emit(
+                f"personalized-{i}",
+                subject=f"Delivery for recipient {i}",
+                body=f"https://delivery.example/recipient/{i}",
+                attachment=f"Personalized release for {i}".encode(),
+                when=base + timedelta(hours=6, minutes=i),
+            )
+            for i in range(3)
+        ]
+        pairs("possible_coordination", personalized)
+        scenarios.append(
+            {
+                "name": "One planned distribution with different exact URLs, bytes and subjects",
+                "files": personalized,
+                "coordinated_distribution": True,
+            }
+        )
+        delayed = [
+            emit(
+                f"delayed-{i}",
+                subject="Scheduled distribution",
+                body="https://scheduled.example/a",
+                when=base + timedelta(hours=9, minutes=i * 61),
+            )
+            for i in range(3)
+        ]
+        pairs("url_reuse", delayed)
+        pairs("possible_coordination", delayed)
+        scenarios.append(
+            {
+                "name": "One planned distribution spaced beyond the default window",
+                "files": delayed,
+                "coordinated_distribution": True,
+            }
+        )
+        positive = [
+            emit(
+                f"planned-direct-{i}",
+                subject="Immediate distribution",
+                body="https://immediate.example/a",
+                when=base + timedelta(hours=15, minutes=i),
+            )
+            for i in range(3)
+        ]
+        pairs("url_reuse", positive)
+        pairs("possible_coordination", positive)
+        scenarios.append(
+            {
+                "name": "One planned distribution with matching artifacts in the window",
+                "files": positive,
+                "coordinated_distribution": True,
+            }
+        )
+
     for i in range(noise):
         token = f"{rng.getrandbits(96):024x}"
         emit(
@@ -232,6 +331,7 @@ def generate(output, tier="simple", seed=47, noise=None):
     truth = {
         "schema_version": 1,
         "seed": seed,
+        "start_utc": base.isoformat(),
         "tier": tier,
         "expected_parameters": {
             "window_seconds": 3600,
@@ -244,7 +344,11 @@ def generate(output, tier="simple", seed=47, noise=None):
             rule: [list(pair) for pair in sorted(pairs)] for rule, pairs in expected.items()
         },
         "scenarios": scenarios,
-        "scope": "Controlled rule behavior. Synthetic accuracy does not establish real-world detection accuracy or investigation time savings.",
+        "scope": (
+            "Controlled challenge: coordination labels represent membership in a declared planned distribution, not satisfaction of the rule. False alarms and misses are expected. Other rules retain observable relationship labels. These fictional scenarios do not establish real-world campaign accuracy."
+            if tier == "challenge"
+            else "Controlled rule behavior. Synthetic accuracy does not establish real-world detection accuracy or investigation time savings."
+        ),
     }
     (output / "ground_truth.json").write_text(json.dumps(truth, indent=2) + "\n", encoding="utf-8")
     return {
@@ -262,12 +366,17 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--tier", choices=TIERS, default="simple")
     parser.add_argument("--seed", type=int, default=47)
+    parser.add_argument("--start", help="Scenario start as ISO 8601 with an explicit UTC offset")
     parser.add_argument(
         "--noise", type=int, help="Override unrelated-message count for scaling evaluation"
     )
     args = parser.parse_args()
     try:
-        print(json.dumps(generate(args.output, args.tier, args.seed, args.noise), indent=2))
+        print(
+            json.dumps(
+                generate(args.output, args.tier, args.seed, args.noise, args.start), indent=2
+            )
+        )
     except (ValueError, OSError) as exc:
         parser.exit(1, f"generate: {exc}\n")
 
