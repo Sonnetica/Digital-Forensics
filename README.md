@@ -36,6 +36,51 @@ Files larger than 25 MiB, empty files, unsupported formats, and exceeded parsing
 limits are rejected. Per-file errors do not discard successful acquisitions.
 An ingest command returns a nonzero exit status when any file fails.
 
+## Investigator interface
+
+```powershell
+etrace serve E:\cases\incident.db --port 8765
+```
+
+Open `http://127.0.0.1:8765` in a current browser. Stop the server with Ctrl+C.
+The interface binds only to this computer's loopback address and does not need
+an internet connection after installation. It is a local, single-investigator
+application, not a hosted service with user accounts.
+
+1. Select **Import evidence**, choose EML/MSG files, then **Acquire evidence**.
+   Uploads allow 100 files per batch, 25 MiB each, and a 100 MiB request limit.
+   Every rejected file is listed; valid files in the same batch are retained.
+2. Select **Run analysis**. Set the coordination window, minimum number of
+   artifact categories, and timestamp source. Defaults are 3,600 seconds,
+   two categories and Date. The case is verified before analysis.
+3. Use **Evidence** to search subjects, addresses, body previews, URLs and hashes.
+   Select a subject to inspect raw headers, timestamp observations, artifacts,
+   acquisition locations and a safe text preview. **Download preserved source**
+   returns the original bytes as an attachment.
+4. Use **Timeline** to filter by relationship type, UTC date range and search
+   term. The date filter selects relationships overlapping the requested range;
+   unknown-time relationships are excluded when a date filter is active.
+   Select **Inspect evidence** to see the rule, exact observations, participating
+   source messages and contextual counter-evidence.
+5. Use **Relationship graph** to explore the same filters. Circles are messages;
+   diamonds are relationships. Reply arrows point from the candidate parent
+   through the relationship to the child. Pan, zoom, drag nodes or select a node
+   to inspect it. Keyboard users can Tab to nodes and press Enter. The graph
+   explicitly limits its display to 180 nodes; the timeline and export remain
+   complete, including groups too large to fit in the graph.
+6. **Case integrity** checks hashes and the audit trail and lists unresolved
+   parent identifiers. **Export case** downloads structured JSON containing all
+   evidence metadata, every analysis run, provenance and the audit chain.
+
+The analysis selector reopens older runs. Summary cards describe the latest
+saved run. A visible notice identifies a stale latest run after new evidence is
+added. Select **Apply** after changing filters; **Reset** clears them.
+
+Browser uploads retain filenames as acquisition labels; use CLI ingestion when
+the original full source path should be recorded. Evidence HTML is never
+inserted into the page, links are not opened automatically, and uploaded
+attachments are neither executed nor written to their claimed filenames.
+
 ## Correlation rules
 
 | Rule | Trigger | Interpretation |

@@ -33,6 +33,9 @@ def main(argv=None):
     analysis.add_argument("--timestamp-source", choices=("date", "received"), default="date")
     analysis.add_argument("--max-candidates", type=int, default=250000)
     analysis.add_argument("--max-events", type=int, default=50000)
+    server = commands.add_parser("serve", help="Open the local investigator interface")
+    server.add_argument("case", type=Path)
+    server.add_argument("--port", type=int, default=8765)
     for name in ("info", "verify", "export"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
@@ -44,6 +47,11 @@ def main(argv=None):
             emit(Case.create(args.case, args.name).summary())
             return 0
         case = Case(args.case)
+        if args.command == "serve":
+            from .web import serve
+
+            serve(args.case, args.port)
+            return 0
         if args.command == "info":
             emit(case.summary())
         elif args.command == "analyze":

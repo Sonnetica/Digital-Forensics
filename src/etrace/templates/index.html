@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content="{{ csrf }}" />
+    <title>{{ case_name }} | E-TRACE</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="{{ url_for('static', filename='favicon.svg') }}"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="E-TRACE home"
+        ><span class="brand-mark">E</span
+        ><span>E-TRACE<small>EMAIL FORENSICS</small></span></a
+      >
+      <div class="nav-label">INVESTIGATION</div>
+      <nav aria-label="Investigation views">
+        <button
+          class="nav-item active"
+          data-view="evidence"
+          aria-current="page"
+        >
+          <span class="nav-symbol">01</span>Evidence
+        </button>
+        <button class="nav-item" data-view="timeline">
+          <span class="nav-symbol">02</span>Timeline
+        </button>
+        <button class="nav-item" data-view="graph">
+          <span class="nav-symbol">03</span>Relationship graph
+        </button>
+        <button class="nav-item" data-view="integrity">
+          <span class="nav-symbol">04</span>Case integrity
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="status-dot"></span> Local workspace
+        <p>
+          Evidence stays on this computer.<br />All displayed times are UTC.
+        </p>
+        <span class="version">E-TRACE / 1.0.0</span>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div class="breadcrumb">
+          CASES <span>/</span> <span id="case-breadcrumb">{{ case_name }}</span>
+        </div>
+        <span class="local-badge">OFFLINE ANALYSIS</span>
+      </header>
+      <div class="workspace">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">INVESTIGATION WORKSPACE</p>
+            <h1>{{ case_name }}</h1>
+            <p class="subtitle">
+              Follow the evidence. Inspect every connection.
+            </p>
+          </div>
+          <div class="actions">
+            <a class="button secondary" href="/api/export" download
+              >Export case</a
+            ><button id="import-open" class="button secondary">
+              Import evidence</button
+            ><button id="analyze-open" class="button primary">
+              Run analysis <span aria-hidden="true">&rarr;</span>
+            </button>
+          </div>
+        </section>
+        <div
+          id="notice"
+          class="notice hidden"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <section class="metrics" aria-label="Case summary">
+          <div class="metric">
+            <span>Source messages</span><strong id="stat-messages">0</strong
+            ><small id="stat-sources">0 acquisition locations</small>
+          </div>
+          <div class="metric">
+            <span>Relationships</span><strong id="stat-events">0</strong
+            ><small id="stat-run">Analysis not run</small>
+          </div>
+          <div class="metric">
+            <span>Extracted artifacts</span
+            ><strong id="stat-artifacts">0</strong
+            ><small>Preserved with source locations</small>
+          </div>
+          <div class="metric">
+            <span>Review observations</span><strong id="stat-warnings">0</strong
+            ><small id="stat-undated">0 messages without a Date time</small>
+          </div>
+        </section>
+        <section class="content-panel">
+          <div class="panel-heading">
+            <div>
+              <h2 id="view-title">Evidence collection</h2>
+              <p id="view-description">
+                Original messages and their extracted artifacts.
+              </p>
+            </div>
+            <span id="result-count" class="count-label"></span>
+          </div>
+          <form id="filters" class="filters">
+            <label class="search"
+              ><span class="sr-only">Search evidence</span
+              ><input
+                id="search"
+                type="search"
+                placeholder="Search subject, address, URL or SHA-256"
+                autocomplete="off"
+            /></label>
+            <label class="run-filter hidden"
+              >Analysis run<select id="run-select">
+                <option value="">Latest run</option>
+              </select></label
+            >
+            <label class="event-filter hidden"
+              ><span class="sr-only">Relationship type</span
+              ><select id="type-filter">
+                <option value="">All relationships</option>
+                <option value="attachment_reuse">Attachment reuse</option>
+                <option value="url_reuse">URL reuse</option>
+                <option value="reply">Reply relationship</option>
+                <option value="possible_coordination">
+                  Possible coordination
+                </option>
+              </select></label
+            >
+            <label class="event-filter hidden"
+              >From UTC<input id="start-filter" type="date"
+            /></label>
+            <label class="event-filter hidden"
+              >To UTC<input id="end-filter" type="date"
+            /></label>
+            <button class="button secondary" type="submit">Apply</button
+            ><button id="clear-filters" class="text-button" type="button">
+              Reset
+            </button>
+          </form>
+          <div id="content" aria-live="polite"></div>
+          <footer id="pagination" class="pagination hidden">
+            <span id="page-description"></span>
+            <div>
+              <button id="previous-page" class="button secondary">
+                Previous</button
+              ><button id="next-page" class="button secondary">Next</button>
+            </div>
+          </footer>
+        </section>
+        <p class="footnote">
+          Connections describe observed overlap and header relationships. They
+          do not establish intent, identity or causation.
+        </p>
+      </div>
+    </main>
+    <dialog id="import-dialog" class="form-dialog">
+      <form id="import-form">
+        <div class="dialog-top">
+          <h2>Import email evidence</h2>
+          <button type="button" class="close-dialog" aria-label="Close">
+            &times;
+          </button>
+        </div>
+        <p>
+          Select EML or Outlook MSG files. Originals are preserved with a
+          SHA-256 hash. Up to 100 files per batch, 25 MiB per file and 100 MiB
+          per request.
+        </p>
+        <label class="upload-zone"
+          >Select evidence files<input
+            id="evidence-files"
+            type="file"
+            accept=".eml,.msg"
+            multiple
+            required
+        /></label>
+        <p class="muted">
+          For large collections, use the command-line directory importer.
+        </p>
+        <div id="import-result" class="operation-result" role="status"></div>
+        <div class="dialog-actions">
+          <button type="button" class="button secondary close-dialog">
+            Cancel</button
+          ><button type="submit" class="button primary">
+            Acquire evidence
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="analysis-dialog" class="form-dialog">
+      <form id="analysis-form">
+        <div class="dialog-top">
+          <h2>Reconstruct relationships</h2>
+          <button type="button" class="close-dialog" aria-label="Close">
+            &times;
+          </button>
+        </div>
+        <p>
+          Every run records its rules and parameters. Previous runs remain
+          available for comparison.
+        </p>
+        <label
+          >Coordination window (seconds)<input
+            id="window-seconds"
+            type="number"
+            min="1"
+            max="604800"
+            value="3600"
+            required /></label
+        ><label
+          >Minimum distinct artifact categories<select id="minimum-signals">
+            <option value="2">2 categories</option>
+            <option value="3">3 categories</option>
+            <option value="4">4 categories</option>
+          </select></label
+        ><label
+          >Time source<select id="timestamp-source">
+            <option value="date">Date header (claimed send time)</option>
+            <option value="received">
+              Top Received header (claimed receipt time)
+            </option>
+          </select></label
+        >
+        <p class="muted">
+          Header times are not independently verified. Unknown times are
+          excluded from temporal coordination. No fallback time is invented.
+        </p>
+        <div id="analysis-result" class="operation-result" role="status"></div>
+        <div class="dialog-actions">
+          <button type="button" class="button secondary close-dialog">
+            Cancel</button
+          ><button type="submit" class="button primary">Run analysis</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="detail-dialog" class="detail-dialog">
+      <div class="dialog-top">
+        <div>
+          <p class="eyebrow" id="detail-eyebrow">EVIDENCE RECORD</p>
+          <h2 id="detail-title"></h2>
+        </div>
+        <button class="close-dialog" aria-label="Close">&times;</button>
+      </div>
+      <div id="detail-content"></div>
+    </dialog>
+  </body>
+</html>
