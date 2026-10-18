@@ -1,6 +1,7 @@
 """Read-only EML and MSG extraction with explicit source locations."""
 
 import ipaddress
+import platform
 import re
 from email import policy
 from email.parser import BytesParser
@@ -84,6 +85,20 @@ def _ips(value):
 
 
 def parse_email(raw, filename):
+    try:
+        return _parse_email(raw, filename)
+    except (RecursionError, LookupError, UnicodeError) as exc:
+        raise ValueError(f"Email parsing failed: {type(exc).__name__}: {exc}") from exc
+    except Exception as exc:
+        if Path(filename).suffix.lower() == ".msg":
+            from extract_msg.exceptions import ExMsgBaseException
+
+            if isinstance(exc, ExMsgBaseException):
+                raise ValueError(f"Outlook parsing failed: {exc}") from exc
+        raise
+
+
+def _parse_email(raw, filename):
     if not raw:
         raise ValueError("The evidence file is empty.")
     if len(raw) > MAX_FILE_BYTES:
@@ -97,6 +112,7 @@ def parse_email(raw, filename):
         "size": len(raw),
         "format": suffix[1:],
         "parser_version": PARSER_VERSION,
+        "parser_runtime": {"python": platform.python_version()},
         "headers": [],
         "artifacts": [],
         "warnings": [],
@@ -280,8 +296,12 @@ def parse_email(raw, filename):
                     trusted=False,
                 )
 
+    total_text_chars = 0
+
     def extract_text(text, content_type, location):
-        if len(text) > MAX_TEXT_CHARS:
+        nonlocal total_text_chars
+        total_text_chars += len(text)
+        if total_text_chars > MAX_TEXT_CHARS:
             raise ValueError("Decoded text limit exceeded; this file was not ingested.")
         record["parts"].append(
             {"location": location, "content_type": content_type, "characters": len(text)}
@@ -294,10 +314,7 @@ def parse_email(raw, filename):
             links.extend(parser.links)
             visible = "\n".join(parser.text)
         for match in URL_PATTERN.finditer(visible):
-            value = match[0].rstrip(".,;!")
-            while value.endswith(")") and value.count(")") > value.count("("):
-                value = value[:-1]
-            links.append((value, f"text:{match.start()}"))
+            links.append((match[0], f"text:{match.start()}"))
         seen = set()
         for value, pointer in links:
             normalized = normalize_url(value)
@@ -396,6 +413,8 @@ def parse_email(raw, filename):
     else:
         import extract_msg
 
+        record["parser_runtime"]["extract_msg"] = extract_msg.__version__
+
         if not raw.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
             raise ValueError("The .msg file is not an Outlook OLE container.")
         with extract_msg.openMsg(raw) as message:
@@ -424,13 +443,27 @@ def parse_email(raw, filename):
                 artifact(
                     "subject", normalize_subject(message.subject), message.subject, "msg:subject"
                 )
-            if message.body:
-                extract_text(message.body, "text/plain", "msg:body")
-            if message.htmlBody:
-                html = message.htmlBody
-                if isinstance(html, bytes):
+            body = message.getStringStream("__substg1.0_1000")
+            html = message.getStream("__substg1.0_10130102")
+            if body:
+                extract_text(body, "text/plain", "msg:stream:__substg1.0_1000")
+            if html:
+                try:
+                    html = html.decode("utf-8", "strict")
+                except UnicodeError:
                     html = html.decode("utf-8", "replace")
-                extract_text(html, "text/html", "msg:htmlBody")
+                    warn(
+                        "charset_fallback",
+                        "MSG HTML decoded with UTF-8 replacement; original bytes remain in the source.",
+                        "msg:stream:__substg1.0_10130102",
+                    )
+                extract_text(html, "text/html", "msg:stream:__substg1.0_10130102")
+            if not body and not html:
+                warn(
+                    "unsupported_msg_body",
+                    "No stored plain-text or HTML body; RTF and encrypted content remain in the source and are not expanded.",
+                    "msg",
+                )
             if len(message.attachments) > MAX_PARTS:
                 raise ValueError("MSG attachment limit exceeded.")
             for i, attachment in enumerate(message.attachments):

@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from . import __version__
@@ -62,7 +62,7 @@ class Case:
         with path.open("xb"):
             pass
         try:
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.executescript(SCHEMA)
                 db.executemany(
                     "INSERT INTO metadata VALUES (?, ?)",
@@ -81,7 +81,7 @@ class Case:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=30)
+        db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         try:
@@ -110,7 +110,9 @@ class Case:
         encoded = canonical(record)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            exists = db.execute("SELECT id FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+            exists = db.execute(
+                "SELECT record_hash,record FROM evidence WHERE id=?", (evidence_id,)
+            ).fetchone()
             if not exists:
                 db.execute(
                     "INSERT INTO evidence VALUES(?,?,?,?,?)",
@@ -124,6 +126,7 @@ class Case:
                     ],
                 )
             acquired = utc_now()
+            record_hash = exists["record_hash"] if exists else digest(encoded.encode())
             inserted = db.execute(
                 "INSERT OR IGNORE INTO sources(evidence_id,name,acquired_at,source_size) VALUES(?,?,?,?)",
                 (evidence_id, name, acquired, len(raw)),
@@ -135,15 +138,16 @@ class Case:
                     {
                         "evidence_id": evidence_id,
                         "source": name,
-                        "record_hash": digest(encoded.encode()),
+                        "record_hash": record_hash,
                         "size": len(raw),
+                        "acquired_at": acquired,
                     },
                 )
         return {
             "id": evidence_id,
             "new_evidence": not bool(exists),
             "new_source": bool(inserted),
-            "warnings": record["warnings"],
+            "warnings": json.loads(exists["record"])["warnings"] if exists else record["warnings"],
         }
 
     def ingest_file(self, path):
@@ -189,12 +193,16 @@ class Case:
 
     def summary(self):
         with self.connect() as db:
-            metadata = dict(db.execute("SELECT key,value FROM metadata"))
-            counts = {
-                table: db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                for table in ("evidence", "sources", "artifacts", "runs")
-            }
-            head = db.execute("SELECT hash FROM audit ORDER BY sequence DESC LIMIT 1").fetchone()
+            return self._summary(db)
+
+    @staticmethod
+    def _summary(db):
+        metadata = dict(db.execute("SELECT key,value FROM metadata"))
+        counts = {
+            table: db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in ("evidence", "sources", "artifacts", "runs")
+        }
+        head = db.execute("SELECT hash FROM audit ORDER BY sequence DESC LIMIT 1").fetchone()
         return {**metadata, **counts, "audit_head": head[0] if head else None}
 
     def save_run(self, result):
@@ -206,7 +214,7 @@ class Case:
             )
             if current_digest != result["evidence_digest"]:
                 raise ValueError("Evidence changed during analysis. Run analysis again.")
-            inserted = db.execute(
+            db.execute(
                 "INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)",
                 (
                     result["id"],
@@ -216,15 +224,20 @@ class Case:
                     encoded,
                     digest(encoded.encode()),
                 ),
-            ).rowcount
-            if inserted:
-                self._audit(
-                    db, "analyze", {"run_id": result["id"], "result_hash": digest(encoded.encode())}
-                )
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES('active_run',?)", (result["id"],)
+            )
+            self._audit(
+                db, "analyze", {"run_id": result["id"], "result_hash": digest(encoded.encode())}
+            )
         return result
 
     def run(self, run_id=None):
         with self.connect() as db:
+            if run_id is None:
+                active = db.execute("SELECT value FROM metadata WHERE key='active_run'").fetchone()
+                run_id = active[0] if active else None
             if run_id:
                 row = db.execute("SELECT result FROM runs WHERE id=?", (run_id,)).fetchone()
             else:
@@ -234,8 +247,15 @@ class Case:
         return json.loads(row[0]) if row else None
 
     def verify(self):
-        errors = []
         with self.connect() as db:
+            db.execute("BEGIN")
+            return self._verify(db)
+
+    @staticmethod
+    def _verify(db):
+        errors = []
+        previous = "0" * 64
+        try:
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 errors.append("SQLite integrity check failed.")
             if db.execute("PRAGMA foreign_key_check").fetchone():
@@ -248,45 +268,107 @@ class Case:
                     errors.append(f"Parsed record hash mismatch: {row['id']}")
                 evidence_hashes[row["id"]] = row["record_hash"]
                 record = json.loads(row["record"])
+                if (
+                    record["id"] != row["id"]
+                    or record["sha256"] != row["id"]
+                    or record["size"] != len(row["raw"])
+                    or record["format"] != row["format"]
+                ):
+                    errors.append(f"Evidence metadata mismatch: {row['id']}")
                 actual = sorted(
-                    r[0]
+                    tuple(r)
                     for r in db.execute(
-                        "SELECT observation FROM artifacts WHERE evidence_id=?", (row["id"],)
+                        "SELECT kind,value,location,observation FROM artifacts WHERE evidence_id=?",
+                        (row["id"],),
                     )
                 )
-                if actual != sorted(canonical(a) for a in record["artifacts"]):
+                if actual != sorted(
+                    (a["kind"], a["value"], a["location"], canonical(a))
+                    for a in record["artifacts"]
+                ):
                     errors.append(f"Artifact index mismatch: {row['id']}")
             runs = {}
             for row in db.execute("SELECT * FROM runs"):
                 if digest(row["result"].encode()) != row["result_hash"]:
                     errors.append(f"Analysis hash mismatch: {row['id']}")
+                result = json.loads(row["result"])
+                if (
+                    result["id"] != row["id"]
+                    or object_digest({k: v for k, v in result.items() if k != "id"}) != row["id"]
+                ):
+                    errors.append(f"Analysis identity mismatch: {row['id']}")
+                if (
+                    canonical(result["config"]) != row["config"]
+                    or result["evidence_digest"] != row["evidence_digest"]
+                ):
+                    errors.append(f"Analysis index mismatch: {row['id']}")
                 runs[row["id"]] = row["result_hash"]
-            previous = "0" * 64
             seen_sources = set()
             seen_runs = set()
+            last_run = None
+            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            sequence = 0
             for row in db.execute("SELECT * FROM audit ORDER BY sequence"):
+                sequence += 1
+                if row["sequence"] != sequence:
+                    errors.append(f"Audit sequence gap at entry {row['sequence']}")
                 expected = object_digest(
                     [row["timestamp"], row["action"], row["payload"], previous]
                 )
                 if expected != row["hash"] or row["previous_hash"] != previous:
                     errors.append(f"Audit chain mismatch at entry {row['sequence']}")
                 payload = json.loads(row["payload"])
-                if row["action"] == "ingest":
+                if sequence == 1 and row["action"] != "create":
+                    errors.append("The audit trail does not begin with case creation.")
+                if row["action"] == "create":
+                    if (
+                        payload["name"] != metadata["name"]
+                        or payload["version"] != metadata["application_version"]
+                        or sequence != 1
+                    ):
+                        errors.append("Case metadata does not match its creation record.")
+                elif row["action"] == "ingest":
                     if evidence_hashes.get(payload["evidence_id"]) != payload["record_hash"]:
                         errors.append(f"Acquisition record mismatch at entry {row['sequence']}")
                     seen_sources.add((payload["evidence_id"], payload["source"]))
+                    source = db.execute(
+                        "SELECT acquired_at,source_size FROM sources WHERE evidence_id=? AND name=?",
+                        (payload["evidence_id"], payload["source"]),
+                    ).fetchone()
+                    if (
+                        source is None
+                        or source["source_size"] != payload["size"]
+                        or (
+                            "acquired_at" in payload
+                            and source["acquired_at"] != payload["acquired_at"]
+                        )
+                    ):
+                        errors.append(
+                            f"Source acquisition metadata mismatch at entry {row['sequence']}"
+                        )
                 elif row["action"] == "analyze":
                     if runs.get(payload["run_id"]) != payload["result_hash"]:
                         errors.append(f"Analysis audit mismatch at entry {row['sequence']}")
                     seen_runs.add(payload["run_id"])
+                    last_run = payload["run_id"]
+                else:
+                    errors.append(f"Unknown audit action at entry {row['sequence']}")
                 previous = row["hash"]
+            if sequence == 0:
+                errors.append("The case audit trail is empty.")
             actual_sources = set(
                 tuple(r) for r in db.execute("SELECT evidence_id,name FROM sources")
             )
             if actual_sources != seen_sources:
                 errors.append("Source inventory does not match the audit trail.")
+            if {source[0] for source in actual_sources} != set(evidence_hashes):
+                errors.append("Evidence inventory does not match source acquisitions.")
             if set(runs) != seen_runs:
                 errors.append("Analysis inventory does not match the audit trail.")
+            if "active_run" in metadata and metadata["active_run"] != last_run:
+                errors.append("Active analysis does not match the audit trail.")
+        except (ValueError, KeyError, TypeError, sqlite3.DatabaseError) as exc:
+            errors.append(f"Case records are malformed: {exc}")
         return {
             "ok": not errors,
             "errors": errors,
@@ -296,15 +378,27 @@ class Case:
 
     def export(self):
         with self.connect() as db:
+            db.execute("BEGIN")
+            evidence = []
+            for row in db.execute("SELECT id,record FROM evidence ORDER BY id"):
+                record = json.loads(row["record"])
+                record["sources"] = [
+                    dict(source)
+                    for source in db.execute(
+                        "SELECT name,acquired_at,source_size FROM sources WHERE evidence_id=? ORDER BY id",
+                        (row["id"],),
+                    )
+                ]
+                evidence.append(record)
             return {
                 "schema_version": SCHEMA_VERSION,
                 "application_version": __version__,
-                "case": self.summary(),
-                "evidence": [self.evidence(r["id"]) for r in self.records()],
+                "case": self._summary(db),
+                "evidence": evidence,
                 "runs": [
                     json.loads(r[0])
                     for r in db.execute("SELECT result FROM runs ORDER BY created_at,id")
                 ],
                 "audit": [dict(r) for r in db.execute("SELECT * FROM audit ORDER BY sequence")],
-                "integrity": self.verify(),
+                "integrity": self._verify(db),
             }
