@@ -122,6 +122,15 @@ limits; the comparison limit is eight times the candidate limit.
 
 ## Reproducible evaluation
 
+The primary evaluation question is whether E-TRACE correctly reconstructs the
+four explicitly defined relationships in the rule table above, with traceable
+supporting evidence. Use the simple, medium and complex controlled tiers for
+rule-conformance metrics, and the public/mixed workloads for processing coverage
+and scoped planted-relationship recovery. The CMU adjacency benchmark and the
+intent-labelled challenge ask broader questions and belong in a separate
+limitations analysis. Do not pool their scores with the primary rule-conformance
+scores or describe rule conformance as proven campaign attribution.
+
 After installing the package, run these commands from the repository root. The
 generator and evaluator refuse to write generated data inside the repository.
 
