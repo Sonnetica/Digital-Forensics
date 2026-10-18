@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etrace-forensics"
+version = "1.0.0"
+description = "Email timeline reconstruction and artifact correlation with evidence provenance"
+requires-python = ">=3.12"
+dependencies = ["Flask==3.1.3", "waitress==3.0.2", "extract-msg==0.56.1"]
+
+[project.scripts]
+etrace = "etrace.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+etrace = ["static/*", "templates/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
