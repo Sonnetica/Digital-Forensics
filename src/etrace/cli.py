@@ -8,6 +8,8 @@ from pathlib import Path
 
 from . import __version__
 from .case import Case
+from .correlate import analyze
+from .model import RuleConfig
 
 
 def emit(value):
@@ -24,6 +26,13 @@ def main(argv=None):
     ingest = commands.add_parser("ingest", help="Read EML or MSG evidence into a case")
     ingest.add_argument("case", type=Path)
     ingest.add_argument("paths", nargs="+", type=Path)
+    analysis = commands.add_parser("analyze", help="Reconstruct relationships with rule provenance")
+    analysis.add_argument("case", type=Path)
+    analysis.add_argument("--window-seconds", type=int, default=3600)
+    analysis.add_argument("--minimum-signals", type=int, default=2)
+    analysis.add_argument("--timestamp-source", choices=("date", "received"), default="date")
+    analysis.add_argument("--max-candidates", type=int, default=250000)
+    analysis.add_argument("--max-events", type=int, default=50000)
     for name in ("info", "verify", "export"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
@@ -37,6 +46,24 @@ def main(argv=None):
         case = Case(args.case)
         if args.command == "info":
             emit(case.summary())
+        elif args.command == "analyze":
+            config = RuleConfig(
+                args.window_seconds,
+                args.minimum_signals,
+                args.timestamp_source,
+                args.max_candidates,
+                args.max_events,
+            )
+            if not case.verify()["ok"]:
+                raise ValueError("Case integrity verification failed. Analysis was not run.")
+            result = case.save_run(analyze(case.records(), config))
+            emit(
+                {
+                    "run_id": result["id"],
+                    **result["statistics"],
+                    "diagnostics": result["diagnostics"],
+                }
+            )
         elif args.command == "verify":
             result = case.verify()
             emit(result)
