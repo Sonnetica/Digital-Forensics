@@ -1,0 +1,20 @@
+From: Nora Lim <nora@seabrook.example>
+To: HR Team <hr@seabrook.example>
+Subject: Sharing browser advisory with new starters
+Message-ID: <browser-hr-20261002@seabrook.example>
+Date: Fri, 02 Oct 2026 13:23:00 +0800
+Received: from client.example ([198.51.100.42]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 13:23:18 +0800
+X-Originating-IP: [198.51.100.42]
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Hi team,
+
+Please include this security notice in Monday's onboarding pack. It explains =
+why the training browser may restart after the update.
+
+https://security.seabrook.example/advisory/browser-oct-2026
+
+Nora

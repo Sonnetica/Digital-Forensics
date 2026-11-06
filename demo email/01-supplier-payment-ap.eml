@@ -1,0 +1,37 @@
+From: Elise Hart <elise@northstar-payments.example>
+To: Priya Menon <priya@seabrook.example>
+Subject: October supplier payment update
+Message-ID: <supplier-ap-20261002@northstar-payments.example>
+Date: Fri, 02 Oct 2026 09:05:00 +0800
+Received: from client.example ([203.0.113.44]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 09:05:18 +0800
+X-Originating-IP: [203.0.113.44]
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="etrace-demo-01-supplier-payment-ap-0"
+
+--etrace-demo-01-supplier-payment-ap-0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hi Priya,
+
+Northstar sent a revised remittance note for the October invoice run. The cop=
+y we received is attached. Please check the request with the vendor using the=
+ telephone number already in our records before changing anything.
+
+Review page: https://vendor-portal.example/review/oct-2026
+
+Thanks,
+Elise
+
+--etrace-demo-01-supplier-payment-ap-0
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="remittance-note.txt"
+MIME-Version: 1.0
+
+Tm9ydGhzdGFyIE9mZmljZSBTdXBwbGllcwpSZWZlcmVuY2U6IE9DVC0yMDI2LTE3ClJlcXVlc3Rl
+ZCBjaGFuZ2U6IHJlbWl0dGFuY2UgaW5zdHJ1Y3Rpb25zClN0YXR1czogcGVuZGluZyBpbmRlcGVu
+ZGVudCB0ZWxlcGhvbmUgY29uZmlybWF0aW9uCg==
+
+--etrace-demo-01-supplier-payment-ap-0--

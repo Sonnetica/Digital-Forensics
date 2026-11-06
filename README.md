@@ -21,7 +21,9 @@ has no cloud services, API keys or external JavaScript/CDN requirements.
 
 ## Create and acquire a case
 
-Keep case databases, input evidence, and exports outside this repository.
+Keep case databases, real input evidence, and exports outside this repository.
+The `demo email/` folder contains 14 fictional EML files for a local trial;
+its [scenario guide](demo%20email/README.md) explains the expected relationships.
 
 ```powershell
 etrace init E:\cases\incident.db --name "Email incident"
@@ -31,6 +33,9 @@ etrace analyze E:\cases\incident.db --window-seconds 3600
 etrace verify E:\cases\incident.db
 etrace export E:\cases\incident.db --output E:\cases\incident.json
 ```
+
+To try the bundled sample emails with a newly created case, ingest
+`".\demo email"` in place of `E:\evidence` in the example above.
 
 Ingestion accepts individual `.eml` and `.msg` files or recursively scans a
 directory. It reads the source, stores its exact bytes and SHA-256 in SQLite,
