@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const labels = {
   attachment_reuse: "Attachment reuse",
   url_reuse: "URL reuse",
+  inline_resource_reuse: "Inline image reuse",
   reply: "Reply relationship",
   possible_coordination: "Possible coordination",
 };
@@ -15,6 +16,7 @@ const state = {
   run: "",
   serial: 0,
   summary: null,
+  runNotice: "",
 };
 
 function el(tag, attributes = {}, ...children) {
@@ -86,7 +88,7 @@ function disclose(title, text) {
 
 async function refresh() {
   const [summary, runs] = await Promise.all([
-    api("/api/case"),
+    api(`/api/case${state.run ? "?run=" + encodeURIComponent(state.run) : ""}`),
     api("/api/runs"),
   ]);
   state.summary = summary;
@@ -98,18 +100,37 @@ async function refresh() {
   $("stat-undated").textContent =
     `${summary.undated} messages without a Date time`;
   const run = summary.latest_run;
-  $("stat-events").textContent = run
-    ? run.statistics.events.toLocaleString()
+  const shown = summary.selected_run;
+  const older = shown && !shown.is_latest;
+  const created = (id) =>
+    (runs.find((r) => r.id === id)?.created_at || "").slice(0, 16).replace("T", " ");
+  $("stat-events").textContent = shown
+    ? shown.statistics.events.toLocaleString()
     : "0";
-  $("stat-run").textContent = run
-    ? run.stale
-      ? "New evidence: rerun analysis"
-      : `${summary.runs} saved analysis ${summary.runs === 1 ? "run" : "runs"}`
-    : "Analysis not run";
-  if (run?.stale)
-    notify(
-      "New evidence has been acquired since the latest analysis. Run analysis to include it.",
+  const reasons = run?.stale_reasons || [];
+  const codes = new Set(reasons.map((r) => r.code));
+  $("stat-run").textContent = older
+    ? `Older run ${created(shown.id)} / ${shown.id.slice(0, 8)}; latest has ${run.statistics.events.toLocaleString()}`
+    : run
+      ? run.stale
+        ? codes.size === 1 && codes.has("evidence")
+          ? "New evidence: rerun analysis"
+          : "Out of date: rerun analysis"
+        : `${summary.runs} saved analysis ${summary.runs === 1 ? "run" : "runs"}`
+      : "Analysis not run";
+  const notices = [];
+  if (older)
+    notices.push(
+      `Viewing an older analysis run (${created(shown.id)} / ${shown.id.slice(0, 8)}) with ${shown.statistics.events.toLocaleString()} relationships. Select "Latest run" to return.`,
     );
+  if (run?.stale)
+    notices.push(
+      `The latest analysis is out of date. ${reasons.map((r) => r.detail).join(" ")} Run analysis again; earlier runs stay available for review.`,
+    );
+  // Keep other messages (ingest, analysis results); clear only a run notice this function set.
+  if (notices.length) notify(notices.join(" "));
+  else if (state.runNotice && $("notice").textContent === state.runNotice) notify("");
+  state.runNotice = notices.length ? notices.join(" ") : "";
   $("run-select").replaceChildren(
     el("option", { value: "" }, "Latest run"),
     ...runs.map((r) =>
@@ -139,6 +160,8 @@ function query() {
     ])
       if ($(id).value) params.set(name, $(id).value);
   }
+  if (state.view === "graph" && $("graph-coordination").checked)
+    params.set("include_coordination", "1");
   return params.toString();
 }
 
@@ -170,6 +193,9 @@ async function loadView() {
     .forEach((n) =>
       n.classList.toggle("hidden", !["timeline", "graph"].includes(state.view)),
     );
+  document
+    .querySelectorAll(".graph-filter")
+    .forEach((n) => n.classList.toggle("hidden", state.view !== "graph"));
   $("pagination").classList.add("hidden");
   $("result-count").textContent = "";
   $("content").replaceChildren(empty("Loading case data", "Please wait."));
@@ -345,6 +371,7 @@ function renderTimeline(data) {
             "div",
             { class: "timeline-card" },
             pill(event.type),
+            event.bulk_mail_indicators ? pill("bulk", "Bulk-mail headers") : null,
             el(
               "h3",
               {},
@@ -355,6 +382,7 @@ function renderTimeline(data) {
               "div",
               { class: "timeline-meta" },
               `${event.email_ids.length} source messages`,
+              ...(event.pair_count ? [`${event.pair_count} supported pairs`] : []),
               `${event.support_count} observations`,
               `${event.context_count} context notes`,
               button(
@@ -501,8 +529,34 @@ async function showEvent(id, run = state.run) {
         ),
       ),
     );
-    content.append(el("h3", {}, "Supporting observations"));
-    for (const observation of event.support) {
+    if (event.pairs) {
+      content.append(el("h3", {}, `${event.pairs.length} supported pairs`));
+      for (const [index, pair] of event.pairs.entries()) {
+        const pairDetail = el(
+          "details",
+          {},
+          el(
+            "summary",
+            {},
+            `Pair ${index + 1}: ${pair.email_ids.map((i) => short(i)).join(" / ")} · ${Object.keys(pair.signals).join(", ")}`,
+          ),
+        );
+        pairDetail.addEventListener("toggle", () => {
+          if (pairDetail.open && !pairDetail.querySelector("pre")) {
+            pairDetail.append(
+              el("pre", {}, JSON.stringify(pair, null, 2)),
+              ...pair.source_email_ids.map((i) =>
+                button(`Source ${short(i)}`, () => showEmail(i, () => showEvent(id, run)), "text-button"),
+              ),
+            );
+          }
+        });
+        content.append(pairDetail);
+      }
+    } else {
+      content.append(el("h3", {}, "Supporting observations"));
+    }
+    for (const observation of event.pairs ? [] : event.support) {
       content.append(
         el(
           "div",
@@ -604,14 +658,14 @@ async function renderIntegrity(data, serial) {
   );
   for (const issue of data.errors)
     box.append(el("div", { class: "observation context" }, issue));
-  box.append(el("h3", {}, "Unresolved relationships"));
+  box.append(el("h3", {}, "Analysis diagnostics"));
   if (!diagnostics.length)
     box.append(
       el(
         "p",
         {},
         state.summary.latest_run
-          ? "No unresolved parent identifiers in this run."
+          ? "No copy or relationship diagnostics in this run."
           : "Run analysis to review relationship diagnostics.",
       ),
     );
@@ -623,11 +677,16 @@ async function renderIntegrity(data, serial) {
         el("small", {}, item.code),
         item.detail,
         item.target ? el("p", { class: "mono" }, item.target) : null,
-        button(
-          `Inspect ${short(item.email_id)}`,
-          () => showEmail(item.email_id),
-          "text-button",
+        item.targets ? el("p", { class: "mono" }, item.targets.join(" ")) : null,
+        item.suggested ? el("p", { class: "mono" }, item.suggested.join(", ")) : null,
+        item.value ? el("p", { class: "mono" }, `${item.kind}: ${item.value}`) : null,
+        // Suppression diagnostics name every affected file; offer the first few.
+        ...(item.email_id ? [item.email_id] : (item.email_ids || []).slice(0, 5)).map(
+          (id) => button(`Inspect ${short(id)}`, () => showEmail(id), "text-button"),
         ),
+        item.email_ids && !item.email_id && item.email_ids.length > 5
+          ? el("small", {}, `and ${item.email_ids.length - 5} more source files`)
+          : null,
       ),
     );
   $("content").replaceChildren(box);
@@ -642,6 +701,8 @@ function renderGraph(data) {
         "No connections to display",
         data.total_events
           ? "Matching groups exceed the 180-node interactive view limit. Inspect the timeline to see full group membership."
+          : data.hidden_coordination
+            ? `${data.hidden_coordination} coordination clusters are hidden. Select Show coordination clusters to inspect them in the graph, or use the timeline.`
           : "Run analysis or adjust the filters to explore related evidence.",
       ),
     );
@@ -767,6 +828,7 @@ function renderGraph(data) {
     const graphLabels = {
       attachment_reuse: "Attachment",
       url_reuse: "URL",
+      inline_resource_reuse: "Inline image",
       reply: "Reply",
       possible_coordination: "Coordination",
     };
@@ -893,7 +955,7 @@ function renderGraph(data) {
     el(
       "p",
       { class: "graph-note" },
-      `${data.truncated ? "This view is limited to 180 nodes; use the timeline for complete results. " : ""}Circles are messages; diamonds are relationships. Arrows indicate header-linked replies. Drag to pan or move nodes; scroll to zoom. Select a node to inspect it.`,
+      `${data.truncated ? "This view is limited to 180 nodes; use the timeline for complete results. " : ""}${data.hidden_coordination ? `${data.hidden_coordination} coordination clusters are hidden; use the checkbox to show them. ` : ""}Circles are messages; diamonds are relationships. Arrows indicate header-linked replies. Drag to pan or move nodes; scroll to zoom. Select a node to inspect it.`,
     ),
     el("div", { class: "graph-surface" }, svg),
   );
@@ -920,20 +982,55 @@ document
 $("import-open").addEventListener("click", () =>
   $("import-dialog").showModal(),
 );
-$("analyze-open").addEventListener("click", () =>
-  $("analysis-dialog").showModal(),
-);
+function domainList(id) {
+  return $(id)
+    .value.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+$("organisation-domains").addEventListener("input", (event) => {
+  event.target.dataset.edited = "true";
+});
+$("analyze-open").addEventListener("click", () => {
+  // The organisation domain is a scoping decision: suggest it, never apply it silently.
+  const suggestion =
+    (state.summary && state.summary.suggested_organisation_domains) || [];
+  // Nothing is entered on the investigator's behalf: a suggestion is applied only
+  // when they choose it or type a domain themselves.
+  const field = $("organisation-domains");
+  const hint = $("organisation-suggestion");
+  if (!suggestion.length) {
+    hint.replaceChildren(
+      "No organisation domain could be suggested from this evidence. Enter it if links to your own organisation should be ignored.",
+    );
+  } else {
+    hint.replaceChildren(
+      `Suggested from this evidence: ${suggestion.join(", ")}. Check it is the investigated organisation, not a supplier, before using it. `,
+      button(
+        "Use suggested domain",
+        () => {
+          field.value = suggestion.join(", ");
+          field.dataset.edited = "true";
+        },
+        "text-button",
+      ),
+    );
+  }
+  $("analysis-dialog").showModal();
+});
 $("filters").addEventListener("submit", (event) => {
   event.preventDefault();
   state.offset = 0;
+  const changed = state.run !== $("run-select").value;
   state.run = $("run-select").value;
-  loadView();
+  (changed ? refresh() : loadView()).catch((error) => notify(error.message, "error"));
 });
 $("clear-filters").addEventListener("click", () => {
   $("filters").reset();
   state.offset = 0;
+  const changed = state.run !== "";
   state.run = "";
-  loadView();
+  (changed ? refresh() : loadView()).catch((error) => notify(error.message, "error"));
 });
 $("previous-page").addEventListener("click", () => {
   state.offset = Math.max(0, state.offset - state.limit);
@@ -994,13 +1091,18 @@ $("analysis-form").addEventListener("submit", async (event) => {
         window_seconds: Number($("window-seconds").value),
         minimum_signals: Number($("minimum-signals").value),
         timestamp_source: $("timestamp-source").value,
+        background_min_outside: Number($("background-min-outside").value),
+        background_ratio: Number($("background-ratio").value),
+        organisation_domains: domainList("organisation-domains"),
+        excluded_url_domains: domainList("excluded-url-domains"),
+        trusted_wrapper_hosts: domainList("trusted-wrapper-hosts"),
       }),
     });
     state.run = "";
     state.offset = 0;
     $("analysis-dialog").close();
     notify(
-      `Analysis saved: ${result.statistics.events} relationships across ${result.statistics.messages} messages. ${result.diagnostics.length} unresolved header relationships.`,
+      `Analysis saved: ${result.statistics.events} relationships across ${result.statistics.messages} source files (${result.statistics.logical_messages} logical messages). ${result.statistics.copy_groups} copy groups; ${result.statistics.coordination_pairs} supported coordination pairs in clusters. ${result.statistics.suppressed_signals} links excluded by domain${result.statistics.organisation_domains.length ? ` (organisation: ${result.statistics.organisation_domains.join(", ")})` : result.statistics.suggested_organisation_domains.length ? " (organisation domain not confirmed)" : ""}; ${result.statistics.background_signal_values} routine background values. ${result.diagnostics.length} analysis diagnostics.`,
       "success",
     );
     $("analysis-result").textContent = "";

@@ -485,6 +485,15 @@ tbody tr:hover {
   background: #eaf0ff;
   color: #285ac2;
 }
+.pill.inline_resource_reuse {
+  background: #f1f3f5;
+  color: #5b6773;
+}
+.pill.bulk {
+  background: #f1f3f5;
+  color: #6b7480;
+  margin-left: 6px;
+}
 .pill.reply {
   background: #f0ecfa;
   color: #7953b0;
@@ -625,6 +634,10 @@ tbody tr:hover {
 .graph-node.attachment_reuse rect {
   fill: #dff2eb;
   stroke: #539e8d;
+}
+.graph-node.inline_resource_reuse rect {
+  fill: #f1f3f5;
+  stroke: #9aa5b1;
 }
 .graph-node.reply rect {
   fill: #eee6fa;

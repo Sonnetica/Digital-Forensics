@@ -60,8 +60,13 @@ application, not a hosted service with user accounts.
    Uploads allow 100 files per batch, 25 MiB each, and a 100 MiB request limit.
    Every rejected file is listed; valid files in the same batch are retained.
 2. Select **Run analysis**. Set the coordination window, minimum number of
-   artifact categories, and timestamp source. Defaults are 3,600 seconds,
-   two categories and Date. The case is verified before analysis.
+   artifact categories, timestamp source and routine-background test. Defaults are
+   3,600 seconds, two categories, Date, at least ten occurrences outside a pair's
+   window at a 5:1 outside-to-inside ratio. The investigated organisation's own
+   domain is left empty: enter it, or select **Use suggested domain** after
+   checking that the suggestion is your organisation and not a supplier. Further
+   URL domains can be excluded from coordination. The case is verified before
+   analysis.
 3. Use **Evidence** to search subjects, addresses, body previews, URLs and hashes.
    Select a subject to inspect raw headers, timestamp observations, artifacts,
    acquisition locations and a safe text preview. **Download preserved source**
@@ -75,15 +80,21 @@ application, not a hosted service with user accounts.
    diamonds are relationships. Reply arrows point from the candidate parent
    through the relationship to the child. Pan, zoom, drag nodes or select a node
    to inspect it. Keyboard users can Tab to nodes and press Enter. The graph
-   explicitly limits its display to 180 nodes; the timeline and export remain
+    hides coordination clusters by default and limits its display to 180 nodes;
+    use **Show coordination clusters** to include them. The timeline and export remain
    complete, including groups too large to fit in the graph.
-6. **Case integrity** checks hashes and the audit trail and lists unresolved
-   parent identifiers. **Export case** downloads structured JSON containing all
+ 6. **Case integrity** checks hashes and the audit trail and lists copy and
+    relationship diagnostics. **Export case** downloads structured JSON containing all
    evidence metadata, every analysis run, provenance and the audit chain.
 
-The analysis selector reopens older runs. Summary cards describe the latest
-selected analysis. A visible notice identifies a stale current run after new evidence is
-added. Select **Apply** after changing filters; **Reset** clears them.
+The analysis selector reopens older runs. The Relationships card and the notice
+follow the run being viewed; an older run shows its own count next to the latest
+run's. A visible notice marks the latest run out of date when evidence
+was added after it, or when it was made with an older rule or parser version (or
+one it did not record), or when the parsed evidence no longer matches the record
+digest saved with the run, and names the reason. An analysis of an empty case is
+current; `etrace info` reports the same
+`latest_run` status. Older runs are never altered and stay available for review. Select **Apply** after changing filters; **Reset** clears them.
 
 Browser uploads retain filenames as acquisition labels; use CLI ingestion when
 the original full source path should be recorded. Evidence HTML is never
@@ -94,15 +105,83 @@ attachments are neither executed nor written to their claimed filenames.
 
 | Rule | Trigger | Interpretation |
 | --- | --- | --- |
-| Attachment reuse | Same SHA-256 in at least two distinct source files | Equal decoded bytes; direction is not inferred |
-| URL reuse | Same conservatively normalized HTTP(S) URL in at least two source files | Shared URL; no network lookup |
-| Reply | In-Reply-To resolves to one unambiguous Message-ID; otherwise the last References identifier when In-Reply-To is absent | Header-linked relationship; References fallback is explicitly qualified |
-| Possible coordination | At least two distinct categories among attachment hash, URL, normalized subject and claimed origin IP, within an inclusive time window | Reviewable hypothesis; excludes resolved reply components |
+| Attachment reuse | Same SHA-256 in at least two distinct logical messages | Equal decoded bytes; direction is not inferred |
+| URL reuse | Same conservatively normalized HTTP(S) URL in at least two distinct logical messages | Shared URL; no network lookup |
+| Reply | Each In-Reply-To identifier resolves to one unambiguous copy group; otherwise the last References identifier when In-Reply-To is absent | Header-linked relationship; References fallback and multi-parent In-Reply-To are explicitly qualified |
+| Inline image reuse | Same inline image SHA-256 (for example a signature logo or embedded QR code) in at least two distinct logical messages | Informational review aid; never a coordination signal and not scored by the evaluator |
+| Possible coordination | A pair of distinct logical messages shares enough non-routine categories among attachment hash, URL, normalized subject and claimed origin IP within an inclusive time window | Reviewable cluster of supported pairs; excludes resolved reply components; bulk-mail headers are labelled |
 
 Each result includes rule version, all parameters, source SHA-256 identities,
 exact matched values, header/MIME locations, supporting observations and
 separate contextual limitations. Ambiguous parents and missing sources appear
-as diagnostics; reply cycles and time reversals remain visible.
+as diagnostics; provisional copy groups, reply cycles and time reversals remain visible.
+RFC 5322 allows In-Reply-To to list several parents. Each resolvable parent then
+receives its own edge, marked `multiple_in_reply_to` in the edge context and in
+the run diagnostics, so no single edge is presented as the only parent.
+
+Transport-header variants are grouped as copies when their single Message-ID,
+sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+decoded content digest matches or the only differences are recognised
+link-protection rewrites. For that comparison the parser records a fingerprint of
+the full decoded content of every part, including HTML markup, attributes,
+comments, hidden form fields, and attachment bytes, filenames and dispositions,
+with each URL masked and
+whitespace collapsed, together with the URLs in order. Two files match only when
+the fingerprints are identical and their URLs decode to the same destinations in
+the same order. Any other difference, such as a changed account number in the
+visible text, a hidden HTML field or a renamed attachment with the same bytes,
+keeps the files apart, and a reply to their
+shared Message-ID stays an ambiguous parent. A gateway that changes markup as
+well as links (for example by adding a warning banner) also leaves its copies
+ambiguous.
+
+Recognised wrappers are HTTPS links on the provider's own domains only:
+Microsoft Defender Safe Links on `safelinks.protection.outlook.com` and
+`safelinks.protection.office365.us` (and their subdomains), and Proofpoint URL
+Defense v2 (`urldefense.proofpoint.com`) and v3 (`urldefense.com`). A look-alike
+host such as `login.safelinks.attacker.example` is never trusted.
+`--trusted-wrapper-host` adds a host that uses the Safe Links `url=` format, for
+example a test corpus or another gateway; it is recorded with the run and should
+normally stay empty. Unwrapping is used only for this comparison; every observed
+URL is preserved exactly. Groups whose raw content differs are marked
+`copy_content_variation`. Every raw file and SHA-256 remains separate evidence.
+Inline MIME resources are recorded as `inline_resource_sha256`, reported as
+inline image reuse, and never used as coordination signals.
+
+Two rules keep routine traffic out of coordination without hiding focused or
+recurring campaigns:
+
+- Links to the investigated organisation's own domain are ignored once the
+  investigator confirms that domain with `--organisation-domain` (repeatable) or
+  in the analysis form. E-TRACE suggests a domain only when it is, without a tie,
+  both the most common recipient domain and the most common sender domain,
+  receives at least half of all recipient addresses and sends at least a quarter
+  of the messages. It never applies the suggestion on its own, and the form does
+  not pre-fill it: who the organisation is depends on how the evidence was
+  collected (mail to or from a supplier can otherwise make the supplier look
+  internal). An unconfirmed suggestion is reported as an
+  `organisation_domain_not_confirmed` diagnostic. `--exclude-url-domain` ignores
+  further domains, for example a second company domain.
+- A shared value is routine background for a given pair when at least
+  `--background-min-outside` occurrences (default 10) fall outside the pair's
+  window extended by one window each side, and they outnumber the occurrences
+  inside it by `--background-ratio` (default 5). A burst, including each wave of a
+  campaign repeated over several days, keeps its signal; a link that appears all
+  month does not.
+
+Every link excluded by domain is listed as a `coordination_signal_suppressed`
+diagnostic, and every value treated as background is listed as a
+`coordination_background_signal` diagnostic with the number of pair comparisons
+it affected and its source files. Neither rule changes URL, attachment or
+subject observations or the reuse events. A cluster containing files with
+List-Unsubscribe, List-Id, Auto-Submitted or Precedence bulk/list/junk headers is
+labelled `bulk_mail_indicators` as a review-priority hint. Bulk mail sent on a
+single day without those headers, such as payslip notices or an authorised
+phishing simulation, is indistinguishable from a burst campaign by these rules and
+remains in the results.
+Overlapping qualifying pairs are shown as one cluster with each pair's signals
+and source observations retained. Cluster membership alone does not imply a
+direct relationship between every member.
 
 Subject matching removes leading Re/Fw/Fwd prefixes, folds case and collapses
 whitespace. URL matching lowercases scheme/host, converts international hostnames
@@ -111,14 +190,22 @@ values, percent encoding, path case and fragments are preserved. IP matching use
 one X-Originating-IP claim or the `from` clause of the oldest Received header;
 shared relay addresses are not automatically treated as senders.
 
-Use `--minimum-signals 3` for a stricter coordination hypothesis or
-`--timestamp-source received` to use the top Received header instead of Date.
+Use `--minimum-signals 3` for a stricter coordination hypothesis,
+`--background-min-outside 10 --background-ratio 5` to tune the routine-background
+test, `--exclude-url-domain company.example` to ignore one more domain and its
+subdomains for coordination, or `--timestamp-source received` to use
+the top Received header instead of Date.
 There is no silent time-source fallback. Parameters are saved with every run.
 Unknown times exclude messages only from temporal coordination. Repeating a run
 with the same parsed evidence and parameters produces the same identifier.
 Each source record includes its Python and, for MSG, extract-msg parser version;
 changing parser runtimes can change extraction and therefore run identifiers. New evidence
 requires a new analysis; old runs remain available in the export.
+For cases ingested with an older parser, analysis and the investigator view
+reparse preserved raw bytes in memory. The originally stored parse and its audit
+hash remain unchanged and are included in the case export. For those items the
+export also contains the derived `analysis_record` used by analysis, and every
+run lists the `parser_versions` of the records it analysed.
 
 Resource limits abort analysis without saving partial results. Defaults allow
 250,000 distinct coordination candidates, 2,000,000 candidate comparisons and
@@ -135,6 +222,33 @@ and scoped planted-relationship recovery. The CMU adjacency benchmark and the
 intent-labelled challenge ask broader questions and belong in a separate
 limitations analysis. Do not pool their scores with the primary rule-conformance
 scores or describe rule conformance as proven campaign attribution.
+
+Older packaged corpora were labelled for rule version 1.0.0, which counted inline
+logos and routine links in coordination and treated copies as separate messages.
+Rule version 1.2.0 replaced the share-based common-artifact filter with the
+organisation-domain and routine-background rules; 1.3.0 made the organisation
+domain an investigator-confirmed setting and limited link-wrapper recognition to
+provider domains; 1.4.0 required the full decoded content, markup included, to
+match before files are grouped as copies; 1.4.1 added attachment filenames and
+dispositions to that comparison. Precision and recall from older labels
+are not a valid benchmark for the current rules. The evaluator reports
+`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.1 and
+review any external corpus labels against the new rule table. Corpora that use a
+fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
+grouping.
+
+The evaluator scores logical messages. Labels and predictions are mapped onto the
+run's copy groups, pairs between copies of one message are dropped, and the
+result lists each copy group by filename. `file_level_per_rule` repeats the
+scoring per preserved file for comparison. If grouping maps a positive and a
+negative label onto the same pair, the labels contradict each other and the
+evaluator stops with exit status 2, naming the conflicting files, instead of
+scoring. The options `--background-min-outside`, `--background-ratio`,
+`--organisation-domain`, `--exclude-url-domain` and `--trusted-wrapper-host` are
+available for
+separately reported sensitivity experiments. Fix parameters before a final run and
+report any tuning separately; the defaults were chosen on fictional corpora and
+have not been validated on real mailbox collections.
 
 After installing the package, run these commands from the repository root. The
 generator and evaluator refuse to write generated data inside the repository.
@@ -315,6 +429,10 @@ the automated evaluations above.
 | `src/etrace/cli.py` | Case acquisition, analysis, export and server commands |
 | `src/etrace/web.py`, `templates/`, `static/` | Local investigator API and browser interface |
 | `evaluation/` | Controlled/challenge generator, scoped evaluator, public-corpus preparation, mixing and external threading assessment |
+| `tests/` | Regression tests for parsing, copy grouping, rules, filters, evaluation scoring, case export and the web API |
+
+Run the regression tests from the repository root with
+`python -m unittest discover -s tests` and lint with `ruff check src tests evaluation`.
 
 The `pyproject.toml` builds an installable Python wheel. Build from a source copy
 outside the repository with `python -m build --wheel --outdir E:\packages` after

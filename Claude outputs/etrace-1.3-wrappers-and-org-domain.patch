@@ -1,0 +1,756 @@
+diff --git a/README.md b/README.md
+index 77fc2a1..a7dfd0e 100644
+--- a/README.md
++++ b/README.md
+@@ -62,9 +62,11 @@ application, not a hosted service with user accounts.
+ 2. Select **Run analysis**. Set the coordination window, minimum number of
+    artifact categories, timestamp source and routine-background test. Defaults are
+    3,600 seconds, two categories, Date, at least ten occurrences outside a pair's
+-   window at a 5:1 outside-to-inside ratio, and automatic detection of the
+-   organisation's own domain. Further URL domains can be excluded from
+-   coordination. The case is verified before analysis.
++   window at a 5:1 outside-to-inside ratio. The investigated organisation's own
++   domain is pre-filled from a suggestion when the evidence supports one; check
++   it is your organisation (not a supplier) before running, or clear it. Further
++   URL domains can be excluded from coordination. The case is verified before
++   analysis.
+ 3. Use **Evidence** to search subjects, addresses, body previews, URLs and hashes.
+    Select a subject to inspect raw headers, timestamp observations, artifacts,
+    acquisition locations and a safe text preview. **Download preserved source**
+@@ -116,8 +118,14 @@ Transport-header variants are grouped as copies when their single Message-ID,
+ sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+ decoded content digest matches or their visible bodies, extracted URLs and payload
+ hashes are identical after two normalisations only: recognised link-protection
+-wrappers are decoded (Microsoft Safe Links on any `*.safelinks.*` host, and
+-Proofpoint URL Defense v2 and v3) and whitespace is collapsed. Any other
++wrappers are decoded and whitespace is collapsed. Recognised wrappers are HTTPS
++links on the provider's own domains only: Microsoft Defender Safe Links on
++`safelinks.protection.outlook.com` and `safelinks.protection.office365.us` (and
++their subdomains), and Proofpoint URL Defense v2 (`urldefense.proofpoint.com`)
++and v3 (`urldefense.com`). A look-alike host such as
++`login.safelinks.attacker.example` is never trusted. `--trusted-wrapper-host`
++adds a host that uses the Safe Links `url=` format, for example a test corpus or
++another gateway; it is recorded with the run and should normally stay empty. Any other
+ difference, such as one changed account number or payment URL behind shared
+ boilerplate, keeps the files apart, and a reply to their shared Message-ID stays an
+ ambiguous parent. Unwrapping is used only for this comparison; every observed URL
+@@ -131,10 +139,14 @@ coordination signals.
+ Two rules keep routine traffic out of coordination without hiding focused or
+ recurring campaigns:
+ 
+-- Links to the investigated organisation's own domain are ignored. A recipient
+-  domain is treated as the organisation's when it receives at least half of all
+-  collected recipient addresses. Detection is on by default
+-  (`--no-auto-organisation-domains` turns it off); `--exclude-url-domain` adds
++- Links to the investigated organisation's own domain are ignored once the
++  investigator confirms that domain with `--organisation-domain` (repeatable) or
++  in the analysis form. E-TRACE suggests a domain that receives at least half of
++  all collected recipient addresses and sends at least a quarter of the messages,
++  but never applies it on its own: who the organisation is depends on how the
++  evidence was collected (a Sent-only collection to a supplier would otherwise
++  make the supplier look internal). An unconfirmed suggestion is reported as an
++  `organisation_domain_not_confirmed` diagnostic. `--exclude-url-domain` ignores
+   further domains, for example a second company domain.
+ - A shared value is routine background for a given pair when at least
+   `--background-min-outside` occurrences (default 10) fall outside the pair's
+@@ -199,11 +211,15 @@ scores or describe rule conformance as proven campaign attribution.
+ 
+ Older packaged corpora were labelled for rule version 1.0.0, which counted inline
+ logos and routine links in coordination and treated copies as separate messages.
+-Rule version 1.2.0 also replaced the share-based common-artifact filter with the
+-organisation-domain and routine-background rules. Precision and recall from older
+-labels are not a valid benchmark for the current rules. The evaluator reports
+-`rule_definition_compatible`; generate fresh controlled tiers for version 1.2.0 and
+-review any external corpus labels against the new rule table.
++Rule version 1.2.0 replaced the share-based common-artifact filter with the
++organisation-domain and routine-background rules; 1.3.0 made the organisation
++domain an investigator-confirmed setting and limited link-wrapper recognition to
++provider domains. Precision and recall from older labels are not a valid
++benchmark for the current rules. The evaluator reports
++`rule_definition_compatible`; generate fresh controlled tiers for version 1.3.0 and
++review any external corpus labels against the new rule table. Corpora that use a
++fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
++grouping.
+ 
+ The evaluator scores logical messages. Labels and predictions are mapped onto the
+ run's copy groups, pairs between copies of one message are dropped, and the
+@@ -212,7 +228,8 @@ scoring per preserved file for comparison. If grouping maps a positive and a
+ negative label onto the same pair, the labels contradict each other and the
+ evaluator stops with exit status 2, naming the conflicting files, instead of
+ scoring. The options `--background-min-outside`, `--background-ratio`,
+-`--no-auto-organisation-domains` and `--exclude-url-domain` are available for
++`--organisation-domain`, `--exclude-url-domain` and `--trusted-wrapper-host` are
++available for
+ separately reported sensitivity experiments. Fix parameters before a final run and
+ report any tuning separately; the defaults were chosen on fictional corpora and
+ have not been validated on real mailbox collections.
+diff --git a/evaluation/evaluate.py b/evaluation/evaluate.py
+index 917b0df..36078f3 100644
+--- a/evaluation/evaluate.py
++++ b/evaluation/evaluate.py
+@@ -354,7 +354,8 @@ def main():
+     parser.add_argument("--timestamp-source", choices=("date", "received"), default="date")
+     parser.add_argument("--background-min-outside", type=int, default=10)
+     parser.add_argument("--background-ratio", type=float, default=5.0)
+-    parser.add_argument("--no-auto-organisation-domains", action="store_true")
++    parser.add_argument("--organisation-domain", action="append", default=[])
++    parser.add_argument("--trusted-wrapper-host", action="append", default=[])
+     parser.add_argument("--exclude-url-domain", action="append", default=[])
+     parser.add_argument(
+         "--reviews",
+@@ -374,8 +375,9 @@ def main():
+                 timestamp_source=args.timestamp_source,
+                 background_min_outside=args.background_min_outside,
+                 background_ratio=args.background_ratio,
+-                auto_organisation_domains=not args.no_auto_organisation_domains,
++                organisation_domains=args.organisation_domain,
+                 excluded_url_domains=args.exclude_url_domain,
++                trusted_wrapper_hosts=args.trusted_wrapper_host,
+             ),
+             args.reviews,
+         )
+diff --git a/evaluation/generate.py b/evaluation/generate.py
+index 133c720..1139f75 100644
+--- a/evaluation/generate.py
++++ b/evaluation/generate.py
+@@ -12,7 +12,7 @@ from itertools import combinations
+ from pathlib import Path
+ 
+ RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
+-RULE_VERSION = "1.2.0"  # Declares the rule definitions used by generated conformance labels.
++RULE_VERSION = "1.3.0"  # Declares the rule definitions used by generated conformance labels.
+ TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
+ 
+ 
+@@ -341,8 +341,9 @@ def generate(output, tier="simple", seed=47, noise=None, start=None):
+             "timestamp_source": "date",
+             "background_min_outside": 10,
+             "background_ratio": 5.0,
+-            "auto_organisation_domains": True,
++            "organisation_domains": [],
+             "excluded_url_domains": [],
++            "trusted_wrapper_hosts": [],
+         },
+         "files": manifest,
+         "duplicate_acquisitions": aliases,
+diff --git a/pyproject.toml b/pyproject.toml
+index 696601b..6960e8b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "etrace-forensics"
+-version = "1.2.0"
++version = "1.3.0"
+ description = "Email timeline reconstruction and artifact correlation with evidence provenance"
+ requires-python = ">=3.12"
+ dependencies = ["Flask==3.1.3", "waitress==3.0.2", "extract-msg==0.56.1"]
+diff --git a/src/etrace/__init__.py b/src/etrace/__init__.py
+index f8b2d9d..43fe67f 100644
+--- a/src/etrace/__init__.py
++++ b/src/etrace/__init__.py
+@@ -1,3 +1,3 @@
+ """Email Timeline Reconstruction and Artifact Correlation Engine."""
+ 
+-__version__ = "1.2.0"
++__version__ = "1.3.0"
+diff --git a/src/etrace/cli.py b/src/etrace/cli.py
+index 62be9cf..dfacecf 100644
+--- a/src/etrace/cli.py
++++ b/src/etrace/cli.py
+@@ -46,9 +46,16 @@ def main(argv=None):
+         help="Outside-to-inside occurrence ratio at which a value is routine background for a pair",
+     )
+     analysis.add_argument(
+-        "--no-auto-organisation-domains",
+-        action="store_true",
+-        help="Do not detect the organisation's own domain from recipients",
++        "--organisation-domain",
++        action="append",
++        default=[],
++        help="Confirmed domain of the investigated organisation; its links are ignored for coordination",
++    )
++    analysis.add_argument(
++        "--trusted-wrapper-host",
++        action="append",
++        default=[],
++        help="Extra link-protection host using the Safe Links url= format (normally not needed)",
+     )
+     analysis.add_argument("--exclude-url-domain", action="append", default=[])
+     server = commands.add_parser("serve", help="Open the local investigator interface")
+@@ -81,8 +88,9 @@ def main(argv=None):
+                 max_events=args.max_events,
+                 background_min_outside=args.background_min_outside,
+                 background_ratio=args.background_ratio,
+-                auto_organisation_domains=not args.no_auto_organisation_domains,
++                organisation_domains=args.organisation_domain,
+                 excluded_url_domains=args.exclude_url_domain,
++                trusted_wrapper_hosts=args.trusted_wrapper_host,
+             )
+             if not case.verify()["ok"]:
+                 raise ValueError("Case integrity verification failed. Analysis was not run.")
+diff --git a/src/etrace/correlate.py b/src/etrace/correlate.py
+index 1cdc3b4..3b9c8e5 100644
+--- a/src/etrace/correlate.py
++++ b/src/etrace/correlate.py
+@@ -11,23 +11,35 @@ from .model import RULE_VERSION, RuleConfig, object_digest
+ 
+ URL_TOKEN = re.compile(r"https?://[^\s<>\x00-\x20\x7f\"']+", re.I)
+ BULK_HEADERS = ("list-unsubscribe", "list-id", "auto-submitted")
+-# A recipient domain receiving at least this share of all collected recipient
+-# addresses is treated as the investigated organisation's own domain.
+-ORGANISATION_RECIPIENT_SHARE = 0.5
++# Provider-operated Microsoft Defender Safe Links domains (worldwide and US
++# government clouds). Matching is by exact domain or subdomain, never substring,
++# so an attacker host such as login.safelinks.attacker.example is not trusted.
++SAFE_LINKS_DOMAINS = ("safelinks.protection.outlook.com", "safelinks.protection.office365.us")
++# Thresholds for the organisation-domain suggestion. A suggestion is never applied
++# automatically; the investigator confirms it with --organisation-domain.
++SUGGEST_RECIPIENT_SHARE = 0.5
++SUGGEST_SENDER_SHARE = 0.25
+ 
+ 
+-def unwrap_url(url):
++def _within(host, domains):
++    return any(host == domain or host.endswith("." + domain) for domain in domains)
++
++
++def unwrap_url(url, trusted_hosts=()):
+     """Return the destination behind a recognised link-protection wrapper.
+ 
+-    Used only to compare candidate mailbox copies; observations keep the URL
+-    exactly as it appears in the evidence. Unrecognised URLs are returned unchanged.
++    Only provider domains (and hosts the investigator explicitly trusts, which use
++    the Safe Links url= format) are recognised. Used only to compare candidate
++    mailbox copies; observations keep the URL exactly as it appears in the evidence.
++    Unrecognised URLs are returned unchanged.
+     """
+     try:
+         parts = urlsplit(url)
++        if parts.scheme.lower() != "https":
++            return url
+         host = (parts.hostname or "").lower()
+         query = parse_qs(parts.query)
+-        # Microsoft Defender Safe Links (any regional *.safelinks.* host).
+-        if ".safelinks." in "." + host and query.get("url"):
++        if _within(host, SAFE_LINKS_DOMAINS + tuple(trusted_hosts)) and query.get("url"):
+             return query["url"][0]
+         # Proofpoint URL Defense v2: u= with "-" for "%" and "_" for "/".
+         if host == "urldefense.proofpoint.com" and parts.path.startswith("/v2/url") and query.get("u"):
+@@ -40,6 +52,26 @@ def unwrap_url(url):
+     return url
+ 
+ 
++def suggest_organisation_domains(records):
++    """Suggest the investigated organisation's domain(s); never applied automatically.
++
++    A domain is suggested only when it receives at least half of all collected
++    recipient addresses and also sends at least a quarter of the messages. A
++    Sent-only collection addressed to a vendor therefore yields no suggestion.
++    """
++    recipients = Counter(r["domain"] for rec in records for r in rec["recipients"] if r["domain"])
++    senders = Counter(s["domain"] for rec in records for s in rec["senders"] if s["domain"])
++    total_recipients, total_senders = sum(recipients.values()), sum(senders.values())
++    if not total_recipients or not total_senders:
++        return []
++    return sorted(
++        domain
++        for domain, count in recipients.items()
++        if count / total_recipients >= SUGGEST_RECIPIENT_SHARE
++        and senders[domain] / total_senders >= SUGGEST_SENDER_SHARE
++    )
++
++
+ def analyze(records, config=None):
+     config = config or RuleConfig()
+     records = sorted(records, key=lambda r: r["id"])
+@@ -85,10 +117,16 @@ def analyze(records, config=None):
+     def normalised_content(record):
+         # Undo only recognised link-protection rewriting and whitespace changes.
+         # Any other difference, such as one account number, keeps files apart.
+-        text = URL_TOKEN.sub(lambda match: unwrap_url(match[0]), record["body_preview"])
++        text = URL_TOKEN.sub(
++            lambda match: unwrap_url(match[0], config.trusted_wrapper_hosts), record["body_preview"]
++        )
+         return (
+             " ".join(text.split()),
+-            frozenset(unwrap_url(a["value"]) for a in record["artifacts"] if a["kind"] == "url"),
++            frozenset(
++                unwrap_url(a["value"], config.trusted_wrapper_hosts)
++                for a in record["artifacts"]
++                if a["kind"] == "url"
++            ),
+             frozenset(payload_hashes(record)),
+         )
+ 
+@@ -448,16 +486,15 @@ def analyze(records, config=None):
+     comparisons = 0
+     suppressed = []
+     background_skips = Counter()
+-    organisation_domains = []
+-    if config.auto_organisation_domains:
+-        recipient_domains = Counter(
+-            r["domain"] for record in records for r in record["recipients"] if r["domain"]
+-        )
+-        total_recipients = sum(recipient_domains.values())
+-        organisation_domains = sorted(
+-            domain
+-            for domain, count in recipient_domains.items()
+-            if count / total_recipients >= ORGANISATION_RECIPIENT_SHARE
++    organisation_domains = list(config.organisation_domains)
++    suggested_domains = suggest_organisation_domains(records)
++    if suggested_domains and not organisation_domains:
++        diagnostics.append(
++            {
++                "code": "organisation_domain_not_confirmed",
++                "suggested": suggested_domains,
++                "detail": "These domains look like the investigated organisation's own (most recipients and a substantial share of senders). They were not applied. Confirm them with --organisation-domain (or the analysis form) to keep their links out of coordination.",
++            }
+         )
+     excluded_domains = [(d, "excluded_url_domain") for d in config.excluded_url_domains] + [
+         (d, "organisation_domain") for d in organisation_domains if d not in config.excluded_url_domains
+@@ -620,7 +657,7 @@ def analyze(records, config=None):
+ 
+     for entry in suppressed:
+         source = (
+-            "the automatically detected organisation domain"
++            "the confirmed organisation domain"
+             if entry["reason"] == "organisation_domain"
+             else "the excluded domain"
+         )
+@@ -672,6 +709,7 @@ def analyze(records, config=None):
+             "suppressed_signals": len(suppressed),
+             "background_signal_values": len(background_skips),
+             "organisation_domains": organisation_domains,
++            "suggested_organisation_domains": suggested_domains,
+             "comparisons": comparisons,
+         },
+     }
+diff --git a/src/etrace/model.py b/src/etrace/model.py
+index 9fa60ec..3d0d54e 100644
+--- a/src/etrace/model.py
++++ b/src/etrace/model.py
+@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
+ from datetime import UTC, datetime
+ 
+ PARSER_VERSION = "1.1.0"
+-RULE_VERSION = "1.2.0"
++RULE_VERSION = "1.3.0"
+ MAX_FILE_BYTES = 25 * 1024 * 1024
+ MAX_PARTS = 1000
+ MAX_TEXT_CHARS = 2_000_000
+@@ -35,6 +35,35 @@ def utc_now():
+     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+ 
+ 
++def clean_domains(values, label):
++    """Validate hostnames (no scheme or path), normalise to IDNA lower case, sort."""
++    if isinstance(values, str) or not isinstance(values, (list, tuple)) or len(values) > 100:
++        raise ValueError(f"{label} must be a list of at most 100 hostnames.")
++    cleaned = []
++    for domain in values:
++        if not isinstance(domain, str):
++            raise ValueError(f"{label} must be strings.")
++        try:
++            value = domain.strip().lower().rstrip(".").encode("idna").decode("ascii")
++        except UnicodeError as exc:
++            raise ValueError(f"{label} contain invalid Unicode.") from exc
++        if (
++            not value
++            or len(value) > 253
++            or any(
++                not part
++                or len(part) > 63
++                or part.startswith("-")
++                or part.endswith("-")
++                or not part.replace("-", "").isalnum()
++                for part in value.split(".")
++            )
++        ):
++            raise ValueError(f"{label} must be hostnames without a scheme or path.")
++        cleaned.append(value)
++    return tuple(sorted(set(cleaned)))
++
++
+ @dataclass(frozen=True)
+ class RuleConfig:
+     window_seconds: int = 3600
+@@ -44,8 +73,9 @@ class RuleConfig:
+     max_events: int = 50_000
+     background_min_outside: int = 10
+     background_ratio: float = 5.0
+-    auto_organisation_domains: bool = True
++    organisation_domains: tuple[str, ...] = ()
+     excluded_url_domains: tuple[str, ...] = ()
++    trusted_wrapper_hosts: tuple[str, ...] = ()
+ 
+     def __post_init__(self):
+         if type(self.window_seconds) is not int or not 1 <= self.window_seconds <= 604800:
+@@ -64,36 +94,15 @@ class RuleConfig:
+             raise ValueError("Background minimum must be an integer from 1 to 1000000.")
+         if type(self.background_ratio) not in (int, float) or not 1 <= self.background_ratio <= 1000:
+             raise ValueError("Background ratio must be a number from 1 to 1000.")
+-        if type(self.auto_organisation_domains) is not bool:
+-            raise ValueError("Automatic organisation-domain detection must be true or false.")
+-        domains = self.excluded_url_domains
+-        if not isinstance(domains, (list, tuple)) or len(domains) > 100:
+-            raise ValueError("Excluded URL domains must be a list of at most 100 domains.")
+-        cleaned = []
+-        for domain in domains:
+-            if not isinstance(domain, str):
+-                raise ValueError("Excluded URL domains must be strings.")
+-            try:
+-                value = domain.strip().lower().rstrip(".").encode("idna").decode("ascii")
+-            except UnicodeError as exc:
+-                raise ValueError("Excluded URL domain has invalid Unicode.") from exc
+-            if (
+-                not value
+-                or len(value) > 253
+-                or any(
+-                    not part
+-                    or len(part) > 63
+-                    or part.startswith("-")
+-                    or part.endswith("-")
+-                    or not part.replace("-", "").isalnum()
+-                    for part in value.split(".")
+-                )
+-            ):
+-                raise ValueError("Excluded URL domains must be hostnames without a scheme or path.")
+-            cleaned.append(value)
+-        object.__setattr__(self, "excluded_url_domains", tuple(sorted(set(cleaned))))
++        for name, label in (
++            ("organisation_domains", "Organisation domains"),
++            ("excluded_url_domains", "Excluded URL domains"),
++            ("trusted_wrapper_hosts", "Trusted wrapper hosts"),
++        ):
++            object.__setattr__(self, name, clean_domains(getattr(self, name), label))
+ 
+     def as_dict(self):
+         result = asdict(self)
+-        result["excluded_url_domains"] = list(self.excluded_url_domains)
++        for name in ("organisation_domains", "excluded_url_domains", "trusted_wrapper_hosts"):
++            result[name] = list(getattr(self, name))
+         return result
+diff --git a/src/etrace/static/app.css b/src/etrace/static/app.css
+index 84e03c3..b8cc288 100644
+--- a/src/etrace/static/app.css
++++ b/src/etrace/static/app.css
+@@ -717,15 +717,6 @@ dialog::backdrop {
+ .form-dialog label select {
+   margin-top: 9px;
+ }
+-.form-dialog label.checkbox-label {
+-  display: flex;
+-  align-items: center;
+-  gap: 8px;
+-}
+-.form-dialog label.checkbox-label input {
+-  width: auto;
+-  margin-top: 0;
+-}
+ .upload-zone {
+   border: 1px dashed #a8bad0;
+   border-radius: 6px;
+diff --git a/src/etrace/static/app.js b/src/etrace/static/app.js
+index c553185..2c1a60e 100644
+--- a/src/etrace/static/app.js
++++ b/src/etrace/static/app.js
+@@ -658,6 +658,7 @@ async function renderIntegrity(data, serial) {
+         item.detail,
+         item.target ? el("p", { class: "mono" }, item.target) : null,
+         item.targets ? el("p", { class: "mono" }, item.targets.join(" ")) : null,
++        item.suggested ? el("p", { class: "mono" }, item.suggested.join(", ")) : null,
+         item.value ? el("p", { class: "mono" }, `${item.kind}: ${item.value}`) : null,
+         // Suppression diagnostics name every affected file; offer the first few.
+         ...(item.email_id ? [item.email_id] : (item.email_ids || []).slice(0, 5)).map(
+@@ -961,9 +962,31 @@ document
+ $("import-open").addEventListener("click", () =>
+   $("import-dialog").showModal(),
+ );
+-$("analyze-open").addEventListener("click", () =>
+-  $("analysis-dialog").showModal(),
+-);
++function domainList(id) {
++  return $(id)
++    .value.split(",")
++    .map((value) => value.trim())
++    .filter(Boolean);
++}
++$("organisation-domains").addEventListener("input", (event) => {
++  event.target.dataset.edited = "true";
++});
++$("analyze-open").addEventListener("click", () => {
++  // The organisation domain is a scoping decision: suggest it, never apply it silently.
++  const suggestion =
++    (state.summary && state.summary.suggested_organisation_domains) || [];
++  $("organisation-suggestion").textContent =
++    suggestion.length === 1
++      ? `Suggested from this evidence: ${suggestion[0]}. Confirm it is the investigated organisation (not a supplier) before running; clear the field to ignore it.`
++      : suggestion.length > 1
++        ? `Several domains fit equally (${suggestion.join(", ")}), for example both sides of a supplier conversation. Enter only the investigated organisation's domain.`
++        : "No organisation domain could be suggested from this evidence. Enter it if links to your own organisation should be ignored.";
++  const field = $("organisation-domains");
++  // Pre-fill only an unambiguous suggestion; never pre-fill a possible supplier.
++  if (!field.dataset.edited && !field.value && suggestion.length === 1)
++    field.value = suggestion[0];
++  $("analysis-dialog").showModal();
++});
+ $("filters").addEventListener("submit", (event) => {
+   event.preventDefault();
+   state.offset = 0;
+@@ -1037,18 +1060,16 @@ $("analysis-form").addEventListener("submit", async (event) => {
+         timestamp_source: $("timestamp-source").value,
+         background_min_outside: Number($("background-min-outside").value),
+         background_ratio: Number($("background-ratio").value),
+-        auto_organisation_domains: $("auto-organisation-domains").checked,
+-        excluded_url_domains: $("excluded-url-domains").value
+-          .split(",")
+-          .map((value) => value.trim())
+-          .filter(Boolean),
++        organisation_domains: domainList("organisation-domains"),
++        excluded_url_domains: domainList("excluded-url-domains"),
++        trusted_wrapper_hosts: domainList("trusted-wrapper-hosts"),
+       }),
+     });
+     state.run = "";
+     state.offset = 0;
+     $("analysis-dialog").close();
+     notify(
+-      `Analysis saved: ${result.statistics.events} relationships across ${result.statistics.messages} source files (${result.statistics.logical_messages} logical messages). ${result.statistics.copy_groups} copy groups; ${result.statistics.coordination_pairs} supported coordination pairs in clusters. ${result.statistics.suppressed_signals} links excluded by domain${result.statistics.organisation_domains.length ? ` (organisation: ${result.statistics.organisation_domains.join(", ")})` : ""}; ${result.statistics.background_signal_values} routine background values. ${result.diagnostics.length} analysis diagnostics.`,
++      `Analysis saved: ${result.statistics.events} relationships across ${result.statistics.messages} source files (${result.statistics.logical_messages} logical messages). ${result.statistics.copy_groups} copy groups; ${result.statistics.coordination_pairs} supported coordination pairs in clusters. ${result.statistics.suppressed_signals} links excluded by domain${result.statistics.organisation_domains.length ? ` (organisation: ${result.statistics.organisation_domains.join(", ")})` : result.statistics.suggested_organisation_domains.length ? " (organisation domain not confirmed)" : ""}; ${result.statistics.background_signal_values} routine background values. ${result.diagnostics.length} analysis diagnostics.`,
+       "success",
+     );
+     $("analysis-result").textContent = "";
+diff --git a/src/etrace/templates/index.html b/src/etrace/templates/index.html
+index b95bebe..7749bb8 100644
+--- a/src/etrace/templates/index.html
++++ b/src/etrace/templates/index.html
+@@ -249,9 +249,20 @@
+             step="0.5"
+             value="5"
+             required /></label
+-          ><label class="checkbox-label"
+-          ><input id="auto-organisation-domains" type="checkbox" checked /> Ignore links
+-            to the organisation's own domain (detected from recipients)</label
++          ><label
++          >Investigated organisation's own domains (confirm; comma separated)<input
++            id="organisation-domains"
++            type="text"
++            placeholder="company.example"
++            autocomplete="off" /></label
++        >
++        <p id="organisation-suggestion" class="muted"></p>
++        <label
++          >Additional trusted link-protection hosts (comma separated; normally empty)<input
++            id="trusted-wrapper-hosts"
++            type="text"
++            placeholder="Microsoft Safe Links and Proofpoint are built in"
++            autocomplete="off" /></label
+           ><label
+           >Exclude URL domains from coordination (comma separated)<input
+             id="excluded-url-domains"
+diff --git a/src/etrace/web.py b/src/etrace/web.py
+index 2029681..0e0c2bd 100644
+--- a/src/etrace/web.py
++++ b/src/etrace/web.py
+@@ -13,7 +13,7 @@ from werkzeug.exceptions import HTTPException
+ 
+ from . import __version__
+ from .case import Case
+-from .correlate import analyze
++from .correlate import analyze, suggest_organisation_domains
+ from .model import EVENT_TYPES, MAX_FILE_BYTES, RuleConfig, object_digest
+ 
+ 
+@@ -105,6 +105,7 @@ def create_app(case_path):
+         records = case.records()
+         info["warnings"] = sum(len(r["warnings"]) for r in records)
+         info["undated"] = sum(r["date_utc"] is None for r in records)
++        info["suggested_organisation_domains"] = suggest_organisation_domains(records)
+         info["latest_run"] = (
+             None
+             if result is None
+diff --git a/tests/test_case_web.py b/tests/test_case_web.py
+index 179a78c..edef40d 100644
+--- a/tests/test_case_web.py
++++ b/tests/test_case_web.py
+@@ -95,6 +95,9 @@ class CaseAndWebTests(unittest.TestCase):
+             self.assertEqual(home.status_code, 200)
+             self.assertIn(b"graph-coordination", home.data)
+             self.assertIn(f"E-TRACE / {__version__}".encode(), home.data)
++            self.assertIn(b'id="organisation-domains"', home.data)
++            summary = client.get("/api/case").get_json()
++            self.assertEqual(summary["suggested_organisation_domains"], ["example.org"])
+             graph = client.get("/api/graph").get_json()
+             self.assertEqual(graph["hidden_coordination"], 1)
+             self.assertEqual(graph["total_events"], 1)  # URL reuse remains visible.
+@@ -135,16 +138,20 @@ class CaseAndWebTests(unittest.TestCase):
+                         "20",
+                         "--background-ratio",
+                         "3",
+-                        "--no-auto-organisation-domains",
++                        "--organisation-domain",
++                        "Example.org",
+                         "--exclude-url-domain",
+                         "example.net",
++                        "--trusted-wrapper-host",
++                        "safelinks.mailprotect.example",
+                     ]
+                 )
+             self.assertEqual(status, 0)
+             config = case.run()["config"]
+             self.assertEqual(config["background_min_outside"], 20)
+             self.assertEqual(config["background_ratio"], 3.0)
+-            self.assertIs(config["auto_organisation_domains"], False)
++            self.assertEqual(config["organisation_domains"], ["example.org"])
++            self.assertEqual(config["trusted_wrapper_hosts"], ["safelinks.mailprotect.example"])
+             self.assertEqual(config["excluded_url_domains"], ["example.net"])
+             self.assertEqual(json.loads(output.getvalue())["coordination_pairs"], 0)
+ 
+diff --git a/tests/test_correlation.py b/tests/test_correlation.py
+index 1e3bea4..adc7b2c 100644
+--- a/tests/test_correlation.py
++++ b/tests/test_correlation.py
+@@ -8,7 +8,7 @@ from pathlib import Path
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ 
+-from etrace.correlate import analyze, unwrap_url  # noqa: E402
++from etrace.correlate import analyze, suggest_organisation_domains, unwrap_url  # noqa: E402
+ from etrace.model import RuleConfig  # noqa: E402
+ from etrace.parser import parse_email  # noqa: E402
+ 
+@@ -140,6 +140,43 @@ class CorrelationTests(unittest.TestCase):
+         )
+         plain = "https://example.net/path?url=https%3A%2F%2Felsewhere.example"
+         self.assertEqual(unwrap_url(plain), plain)
++        government = "https://gcc02.safelinks.protection.office365.us/?url=https%3A%2F%2Fportal.vendor.example%2Fpay&data=x"
++        self.assertEqual(unwrap_url(government), "https://portal.vendor.example/pay")
++        # Look-alike and non-HTTPS hosts are never treated as a provider wrapper.
++        for untrusted in (
++            "https://login.safelinks.attacker.example/?url=https%3A%2F%2Fportal.vendor.example%2Fpay",
++            "https://safelinks.protection.outlook.com.attacker.example/?url=https%3A%2F%2Fportal.vendor.example%2Fpay",
++            "https://evilsafelinks.protection.outlook.com/?url=https%3A%2F%2Fportal.vendor.example%2Fpay",
++            "http://apc01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fportal.vendor.example%2Fpay",
++        ):
++            self.assertEqual(unwrap_url(untrusted), untrusted)
++        # An explicitly trusted host uses the Safe Links url= format.
++        test_host = "https://apc01.safelinks.mailprotect.example/?url=https%3A%2F%2Fportal.vendor.example%2Fpay"
++        self.assertEqual(unwrap_url(test_host), test_host)
++        self.assertEqual(
++            unwrap_url(test_host, ("safelinks.mailprotect.example",)), "https://portal.vendor.example/pay"
++        )
++
++    def test_look_alike_wrapper_host_does_not_create_a_copy(self):
++        parent_id = "<lookalike@example.org>"
++        common = "Please settle the attached statement through our portal by Friday. " * 3
++        genuine = email("genuine", message_id=parent_id, body=common + "Pay: https://portal.vendor.example/pay")
++        forged = email(
++            "forged",
++            message_id=parent_id,
++            body=common
++            + "Pay: https://login.safelinks.attacker.example/?url=https%3A%2F%2Fportal.vendor.example%2Fpay&data=x",
++        )
++        child = email("child", subject="Re: Update", parent=parent_id)
++        result = analyze([genuine, forged, child])
++        self.assertEqual(result["statistics"]["copy_groups"], 0)
++        self.assertFalse(any(e["type"] == "reply" for e in result["events"]))
++        self.assertTrue(any(d["code"] == "ambiguous_parent" for d in result["diagnostics"]))
++        trusted = analyze(
++            [genuine, forged, child], RuleConfig(trusted_wrapper_hosts=("safelinks.attacker.example",))
++        )
++        self.assertEqual(trusted["statistics"]["copy_groups"], 1)  # only because the investigator said so
++        self.assertEqual(trusted["config"]["trusted_wrapper_hosts"], ["safelinks.attacker.example"])
+ 
+     def test_shared_boilerplate_with_different_links_stays_ambiguous(self):
+         parent_id = "<remittance@example.org>"
+@@ -173,31 +210,53 @@ class CorrelationTests(unittest.TestCase):
+         result = analyze([first, second])
+         self.assertFalse(any(e["type"] == "possible_coordination" for e in result["events"]))
+ 
+-    def test_organisation_and_excluded_domains_are_listed(self):
+-        # Recipients are all @example.org, so that is detected as the organisation.
++    def test_organisation_domain_is_suggested_but_only_applied_when_confirmed(self):
++        # Everything is sent and received @example.org, so that is suggested.
+         pair = [
+             email("link-a", subject="Same", body="https://intranet.example.org/home"),
+             email("link-b", subject="Same", body="https://intranet.example.org/home"),
+         ]
+-        result = analyze(pair)
+-        self.assertEqual(result["statistics"]["organisation_domains"], ["example.org"])
+-        self.assertEqual(result["statistics"]["coordination_pairs"], 0)
+-        listed = [d for d in result["diagnostics"] if d["code"] == "coordination_signal_suppressed"]
++        unconfirmed = analyze(pair)
++        self.assertEqual(unconfirmed["statistics"]["suggested_organisation_domains"], ["example.org"])
++        self.assertEqual(unconfirmed["statistics"]["organisation_domains"], [])
++        self.assertEqual(unconfirmed["statistics"]["coordination_pairs"], 1)
++        notice = [d for d in unconfirmed["diagnostics"] if d["code"] == "organisation_domain_not_confirmed"]
++        self.assertEqual(notice[0]["suggested"], ["example.org"])
++
++        confirmed = analyze(pair, RuleConfig(organisation_domains=("example.org",)))
++        self.assertEqual(confirmed["statistics"]["organisation_domains"], ["example.org"])
++        self.assertEqual(confirmed["statistics"]["coordination_pairs"], 0)
++        self.assertFalse(any(d["code"] == "organisation_domain_not_confirmed" for d in confirmed["diagnostics"]))
++        listed = [d for d in confirmed["diagnostics"] if d["code"] == "coordination_signal_suppressed"]
+         self.assertEqual([(d["reason"], d["domain"]) for d in listed], [("organisation_domain", "example.org")])
+         self.assertEqual(len(listed[0]["email_ids"]), 2)
+-        # URL reuse is still reported.
+-        self.assertTrue(any(e["type"] == "url_reuse" for e in result["events"]))
+-        manual = analyze(pair, RuleConfig(auto_organisation_domains=False))
+-        self.assertEqual(manual["statistics"]["coordination_pairs"], 1)
+-        self.assertEqual(manual["statistics"]["organisation_domains"], [])
++        self.assertTrue(any(e["type"] == "url_reuse" for e in confirmed["events"]))
++        self.assertEqual(confirmed["config"]["organisation_domains"], ["example.org"])
++
++    def test_sent_only_mail_to_a_vendor_does_not_suppress_the_vendor(self):
++        def sent(name, minutes):
++            message = EmailMessage()
++            message["From"] = "priya@halcyon.example"
++            message["To"] = "ar@vendor.example"
++            message["Date"] = (DATE + timedelta(minutes=minutes)).strftime("%a, %d %b %Y %H:%M:%S %z")
++            message["Subject"] = "Remittance query"
++            message["Message-ID"] = f"<{name}@halcyon.example>"
++            message.set_content("See https://portal.vendor.example/statement/77")
++            return parse_email(message.as_bytes(), name + ".eml")
++
++        records = [sent("s1", 0), sent("s2", 20)]
++        self.assertEqual(suggest_organisation_domains(records), [])  # vendor never sends here
++        result = analyze(records)
++        self.assertEqual(result["statistics"]["organisation_domains"], [])
++        self.assertEqual(result["statistics"]["coordination_pairs"], 1)
+ 
++    def test_excluded_domains_are_listed(self):
+         other = [
+             email("ext-a", subject="Same", body="https://company.example/home"),
+             email("ext-b", subject="Same", body="https://company.example/home"),
+         ]
+         self.assertEqual(analyze(other)["statistics"]["coordination_pairs"], 1)
+-        config = RuleConfig(excluded_url_domains=("company.example",))
+-        excluded = analyze(other, config)
++        excluded = analyze(other, RuleConfig(excluded_url_domains=("company.example",)))
+         self.assertEqual(excluded["statistics"]["coordination_pairs"], 0)
+         self.assertTrue(
+             any(
+diff --git a/tests/test_evaluate.py b/tests/test_evaluate.py
+index 5a81e0e..700d869 100644
+--- a/tests/test_evaluate.py
++++ b/tests/test_evaluate.py
+@@ -42,7 +42,7 @@ class EvaluateTests(unittest.TestCase):
+         return files
+ 
+     def test_conflicting_labels_after_copy_grouping_are_rejected(self):
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+             folder = Path(directory)
+             files = self._copy_dataset(folder)
+             rules = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
+@@ -66,7 +66,7 @@ class EvaluateTests(unittest.TestCase):
+                 evaluate_module.evaluate(folder)
+ 
+     def test_reply_labelled_against_any_copy_scores_once(self):
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+             folder = Path(directory)
+             files = self._copy_dataset(folder)
+             truth = {

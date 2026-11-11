@@ -33,6 +33,31 @@ def main(argv=None):
     analysis.add_argument("--timestamp-source", choices=("date", "received"), default="date")
     analysis.add_argument("--max-candidates", type=int, default=250000)
     analysis.add_argument("--max-events", type=int, default=50000)
+    analysis.add_argument(
+        "--background-min-outside",
+        type=int,
+        default=10,
+        help="Occurrences outside a pair's window before a value can count as routine background",
+    )
+    analysis.add_argument(
+        "--background-ratio",
+        type=float,
+        default=5.0,
+        help="Outside-to-inside occurrence ratio at which a value is routine background for a pair",
+    )
+    analysis.add_argument(
+        "--organisation-domain",
+        action="append",
+        default=[],
+        help="Confirmed domain of the investigated organisation; its links are ignored for coordination",
+    )
+    analysis.add_argument(
+        "--trusted-wrapper-host",
+        action="append",
+        default=[],
+        help="Extra link-protection host using the Safe Links url= format (normally not needed)",
+    )
+    analysis.add_argument("--exclude-url-domain", action="append", default=[])
     server = commands.add_parser("serve", help="Open the local investigator interface")
     server.add_argument("case", type=Path)
     server.add_argument("--port", type=int, default=8765)
@@ -53,14 +78,19 @@ def main(argv=None):
             serve(args.case, args.port)
             return 0
         if args.command == "info":
-            emit(case.summary())
+            emit({**case.summary(), "latest_run": case.run_status()})
         elif args.command == "analyze":
             config = RuleConfig(
-                args.window_seconds,
-                args.minimum_signals,
-                args.timestamp_source,
-                args.max_candidates,
-                args.max_events,
+                window_seconds=args.window_seconds,
+                minimum_signals=args.minimum_signals,
+                timestamp_source=args.timestamp_source,
+                max_candidates=args.max_candidates,
+                max_events=args.max_events,
+                background_min_outside=args.background_min_outside,
+                background_ratio=args.background_ratio,
+                organisation_domains=args.organisation_domain,
+                excluded_url_domains=args.exclude_url_domain,
+                trusted_wrapper_hosts=args.trusted_wrapper_host,
             )
             if not case.verify()["ok"]:
                 raise ValueError("Case integrity verification failed. Analysis was not run.")

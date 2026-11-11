@@ -1,0 +1,518 @@
+diff --git a/README.md b/README.md
+index a7dfd0e..79477fa 100644
+--- a/README.md
++++ b/README.md
+@@ -63,8 +63,8 @@ application, not a hosted service with user accounts.
+    artifact categories, timestamp source and routine-background test. Defaults are
+    3,600 seconds, two categories, Date, at least ten occurrences outside a pair's
+    window at a 5:1 outside-to-inside ratio. The investigated organisation's own
+-   domain is pre-filled from a suggestion when the evidence supports one; check
+-   it is your organisation (not a supplier) before running, or clear it. Further
++   domain is left empty: enter it, or select **Use suggested domain** after
++   checking that the suggestion is your organisation and not a supplier. Further
+    URL domains can be excluded from coordination. The case is verified before
+    analysis.
+ 3. Use **Evidence** to search subjects, addresses, body previews, URLs and hashes.
+@@ -116,36 +116,43 @@ the run diagnostics, so no single edge is presented as the only parent.
+ 
+ Transport-header variants are grouped as copies when their single Message-ID,
+ sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+-decoded content digest matches or their visible bodies, extracted URLs and payload
+-hashes are identical after two normalisations only: recognised link-protection
+-wrappers are decoded and whitespace is collapsed. Recognised wrappers are HTTPS
+-links on the provider's own domains only: Microsoft Defender Safe Links on
+-`safelinks.protection.outlook.com` and `safelinks.protection.office365.us` (and
+-their subdomains), and Proofpoint URL Defense v2 (`urldefense.proofpoint.com`)
+-and v3 (`urldefense.com`). A look-alike host such as
+-`login.safelinks.attacker.example` is never trusted. `--trusted-wrapper-host`
+-adds a host that uses the Safe Links `url=` format, for example a test corpus or
+-another gateway; it is recorded with the run and should normally stay empty. Any other
+-difference, such as one changed account number or payment URL behind shared
+-boilerplate, keeps the files apart, and a reply to their shared Message-ID stays an
+-ambiguous parent. Unwrapping is used only for this comparison; every observed URL
+-is preserved exactly. Groups whose raw content differs are marked
+-`copy_content_variation`. Bodies longer than the 12,000-character preview are
+-grouped only when their decoded content digests match. Every raw file and SHA-256
+-remains separate evidence. Inline MIME resources are recorded as
+-`inline_resource_sha256`, reported as inline image reuse, and never used as
+-coordination signals.
++decoded content digest matches or the only differences are recognised
++link-protection rewrites. For that comparison the parser records a fingerprint of
++the full decoded content of every part, including HTML markup, attributes,
++comments, hidden form fields and attachment bytes, with each URL masked and
++whitespace collapsed, together with the URLs in order. Two files match only when
++the fingerprints are identical and their URLs decode to the same destinations in
++the same order. Any other difference, such as a changed account number in the
++visible text or a hidden HTML field, keeps the files apart, and a reply to their
++shared Message-ID stays an ambiguous parent. A gateway that changes markup as
++well as links (for example by adding a warning banner) also leaves its copies
++ambiguous.
++
++Recognised wrappers are HTTPS links on the provider's own domains only:
++Microsoft Defender Safe Links on `safelinks.protection.outlook.com` and
++`safelinks.protection.office365.us` (and their subdomains), and Proofpoint URL
++Defense v2 (`urldefense.proofpoint.com`) and v3 (`urldefense.com`). A look-alike
++host such as `login.safelinks.attacker.example` is never trusted.
++`--trusted-wrapper-host` adds a host that uses the Safe Links `url=` format, for
++example a test corpus or another gateway; it is recorded with the run and should
++normally stay empty. Unwrapping is used only for this comparison; every observed
++URL is preserved exactly. Groups whose raw content differs are marked
++`copy_content_variation`. Every raw file and SHA-256 remains separate evidence.
++Inline MIME resources are recorded as `inline_resource_sha256`, reported as
++inline image reuse, and never used as coordination signals.
+ 
+ Two rules keep routine traffic out of coordination without hiding focused or
+ recurring campaigns:
+ 
+ - Links to the investigated organisation's own domain are ignored once the
+   investigator confirms that domain with `--organisation-domain` (repeatable) or
+-  in the analysis form. E-TRACE suggests a domain that receives at least half of
+-  all collected recipient addresses and sends at least a quarter of the messages,
+-  but never applies it on its own: who the organisation is depends on how the
+-  evidence was collected (a Sent-only collection to a supplier would otherwise
+-  make the supplier look internal). An unconfirmed suggestion is reported as an
++  in the analysis form. E-TRACE suggests a domain only when it is, without a tie,
++  both the most common recipient domain and the most common sender domain,
++  receives at least half of all recipient addresses and sends at least a quarter
++  of the messages. It never applies the suggestion on its own, and the form does
++  not pre-fill it: who the organisation is depends on how the evidence was
++  collected (mail to or from a supplier can otherwise make the supplier look
++  internal). An unconfirmed suggestion is reported as an
+   `organisation_domain_not_confirmed` diagnostic. `--exclude-url-domain` ignores
+   further domains, for example a second company domain.
+ - A shared value is routine background for a given pair when at least
+@@ -214,9 +221,10 @@ logos and routine links in coordination and treated copies as separate messages.
+ Rule version 1.2.0 replaced the share-based common-artifact filter with the
+ organisation-domain and routine-background rules; 1.3.0 made the organisation
+ domain an investigator-confirmed setting and limited link-wrapper recognition to
+-provider domains. Precision and recall from older labels are not a valid
+-benchmark for the current rules. The evaluator reports
+-`rule_definition_compatible`; generate fresh controlled tiers for version 1.3.0 and
++provider domains; 1.4.0 required the full decoded content, markup included, to
++match before files are grouped as copies. Precision and recall from older labels
++are not a valid benchmark for the current rules. The evaluator reports
++`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.0 and
+ review any external corpus labels against the new rule table. Corpora that use a
+ fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
+ grouping.
+diff --git a/evaluation/generate.py b/evaluation/generate.py
+index 1139f75..8afc3db 100644
+--- a/evaluation/generate.py
++++ b/evaluation/generate.py
+@@ -12,7 +12,7 @@ from itertools import combinations
+ from pathlib import Path
+ 
+ RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
+-RULE_VERSION = "1.3.0"  # Declares the rule definitions used by generated conformance labels.
++RULE_VERSION = "1.4.0"  # Declares the rule definitions used by generated conformance labels.
+ TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
+ 
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 6960e8b..ca1c4b1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "etrace-forensics"
+-version = "1.3.0"
++version = "1.4.0"
+ description = "Email timeline reconstruction and artifact correlation with evidence provenance"
+ requires-python = ">=3.12"
+ dependencies = ["Flask==3.1.3", "waitress==3.0.2", "extract-msg==0.56.1"]
+diff --git a/src/etrace/__init__.py b/src/etrace/__init__.py
+index 43fe67f..43cb3a3 100644
+--- a/src/etrace/__init__.py
++++ b/src/etrace/__init__.py
+@@ -1,3 +1,3 @@
+ """Email Timeline Reconstruction and Artifact Correlation Engine."""
+ 
+-__version__ = "1.3.0"
++__version__ = "1.4.0"
+diff --git a/src/etrace/correlate.py b/src/etrace/correlate.py
+index 3b9c8e5..1b97c86 100644
+--- a/src/etrace/correlate.py
++++ b/src/etrace/correlate.py
+@@ -1,6 +1,5 @@
+ """Deterministic rules with indexed candidates and inspectable provenance."""
+ 
+-import re
+ from bisect import bisect_left, bisect_right
+ from collections import Counter, defaultdict
+ from datetime import datetime
+@@ -9,7 +8,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
+ from . import __version__
+ from .model import RULE_VERSION, RuleConfig, object_digest
+ 
+-URL_TOKEN = re.compile(r"https?://[^\s<>\x00-\x20\x7f\"']+", re.I)
+ BULK_HEADERS = ("list-unsubscribe", "list-id", "auto-submitted")
+ # Provider-operated Microsoft Defender Safe Links domains (worldwide and US
+ # government clouds). Matching is by exact domain or subdomain, never substring,
+@@ -53,23 +51,33 @@ def unwrap_url(url, trusted_hosts=()):
+ 
+ 
+ def suggest_organisation_domains(records):
+-    """Suggest the investigated organisation's domain(s); never applied automatically.
++    """Suggest the investigated organisation's domain; never applied automatically.
+ 
+-    A domain is suggested only when it receives at least half of all collected
+-    recipient addresses and also sends at least a quarter of the messages. A
+-    Sent-only collection addressed to a vendor therefore yields no suggestion.
++    One domain is suggested only when it is, without a tie, both the most common
++    recipient domain and the most common sender domain, receives at least half
++    of all recipient addresses and sends at least a quarter of the messages.
++    Collections dominated by one direction of a supplier conversation (for
++    example Sent mail to a vendor) therefore produce no suggestion.
+     """
+     recipients = Counter(r["domain"] for rec in records for r in rec["recipients"] if r["domain"])
+     senders = Counter(s["domain"] for rec in records for s in rec["senders"] if s["domain"])
+     total_recipients, total_senders = sum(recipients.values()), sum(senders.values())
+     if not total_recipients or not total_senders:
+         return []
+-    return sorted(
+-        domain
+-        for domain, count in recipients.items()
+-        if count / total_recipients >= SUGGEST_RECIPIENT_SHARE
+-        and senders[domain] / total_senders >= SUGGEST_SENDER_SHARE
+-    )
++
++    def unique_top(counter):
++        ranked = counter.most_common(2)
++        return ranked[0][0] if len(ranked) == 1 or ranked[0][1] > ranked[1][1] else None
++
++    domain = unique_top(recipients)
++    if (
++        domain is None
++        or domain != unique_top(senders)
++        or recipients[domain] / total_recipients < SUGGEST_RECIPIENT_SHARE
++        or senders[domain] / total_senders < SUGGEST_SENDER_SHARE
++    ):
++        return []
++    return [domain]
+ 
+ 
+ def analyze(records, config=None):
+@@ -107,35 +115,21 @@ def analyze(records, config=None):
+             key = ("unverified", record["id"])
+         header_groups[key].append(record["id"])
+ 
+-    def payload_hashes(record):
+-        return {
+-            (a["kind"], a["value"])
+-            for a in record["artifacts"]
+-            if a["kind"] in ("attachment_sha256", "inline_resource_sha256")
+-        }
+-
+-    def normalised_content(record):
+-        # Undo only recognised link-protection rewriting and whitespace changes.
+-        # Any other difference, such as one account number, keeps files apart.
+-        text = URL_TOKEN.sub(
+-            lambda match: unwrap_url(match[0], config.trusted_wrapper_hosts), record["body_preview"]
+-        )
+-        return (
+-            " ".join(text.split()),
+-            frozenset(
+-                unwrap_url(a["value"], config.trusted_wrapper_hosts)
+-                for a in record["artifacts"]
+-                if a["kind"] == "url"
+-            ),
+-            frozenset(payload_hashes(record)),
+-        )
+-
+     def compatible_copy(left, right):
+         if left["content_digest"] == right["content_digest"]:
+             return True
+-        if max(len(left["body_preview"]), len(right["body_preview"])) >= 12000:
+-            return False  # A truncated preview cannot prove that two bodies are equal.
+-        return normalised_content(left) == normalised_content(right)
++        # Raw content differs. Allow only differences explained by recognised
++        # link-protection rewriting: the full decoded content of every part,
++        # including HTML markup, attributes and hidden fields, must be identical
++        # once each URL is masked, and the URLs must match in order after unwrapping.
++        left_print, right_print = left.get("copy_fingerprint"), right.get("copy_fingerprint")
++        if not left_print or not right_print or left_print["structure"] != right_print["structure"]:
++            return False
++
++        def destinations(fingerprint):
++            return [unwrap_url(url, config.trusted_wrapper_hosts) for url in fingerprint["urls"]]
++
++        return destinations(left_print) == destinations(right_print)
+ 
+     copies = {}
+     copy_content_variations = {}
+@@ -176,7 +170,7 @@ def analyze(records, config=None):
+                 "code": "copy_content_variation",
+                 "email_id": rep,
+                 "copies": ids,
+-                "detail": "These mailbox copies share stable headers and payload hashes, and their bodies and links are identical once recognised link-protection rewriting and whitespace are normalised. Their raw decoded content still differs; review every preserved source.",
++                "detail": "These mailbox copies share stable headers, and their full decoded content (including HTML markup and attachments) is identical except for URLs that decode to the same destinations through recognised link protection and whitespace. Their raw content still differs; review every preserved source.",
+             }
+         )
+ 
+@@ -373,7 +367,7 @@ def analyze(records, config=None):
+                         {
+                             "code": "copy_content_variation",
+                             "email_ids": copy_content_variations[group_rep],
+-                            "detail": "These files match stable message headers, payload hashes and normalised bodies and links, but their raw decoded content differs (for example link-protection rewriting). Review the preserved sources before relying on the reply link.",
++                            "detail": "These files match stable message headers and their full decoded content except for recognised link-protection rewriting of URLs. Review the preserved sources before relying on the reply link.",
+                         }
+                     )
+             if parent in times and child_id in times and times[parent] > times[child_id]:
+diff --git a/src/etrace/model.py b/src/etrace/model.py
+index 3d0d54e..df884f5 100644
+--- a/src/etrace/model.py
++++ b/src/etrace/model.py
+@@ -5,8 +5,8 @@ import json
+ from dataclasses import asdict, dataclass
+ from datetime import UTC, datetime
+ 
+-PARSER_VERSION = "1.1.0"
+-RULE_VERSION = "1.3.0"
++PARSER_VERSION = "1.2.0"
++RULE_VERSION = "1.4.0"
+ MAX_FILE_BYTES = 25 * 1024 * 1024
+ MAX_PARTS = 1000
+ MAX_TEXT_CHARS = 2_000_000
+diff --git a/src/etrace/parser.py b/src/etrace/parser.py
+index 7d8d329..edfe348 100644
+--- a/src/etrace/parser.py
++++ b/src/etrace/parser.py
+@@ -1,5 +1,6 @@
+ """Read-only EML and MSG extraction with explicit source locations."""
+ 
++import html as html_entities
+ import ipaddress
+ import platform
+ import re
+@@ -136,7 +137,12 @@ def _parse_email(raw, filename):
+         "body_preview": "",
+         "parts": [],
+         "content_digest": None,
++        "copy_fingerprint": None,
+     }
++    # Full decoded content with every URL masked, plus the URLs in order. Copy
++    # grouping may only explain differences in those URLs (recognised link
++    # rewriting); any other change, including hidden HTML markup, keeps files apart.
++    fingerprint_parts, fingerprint_urls = [], []
+ 
+     def warn(code, message, location):
+         record["warnings"].append({"code": code, "message": message, "location": location})
+@@ -312,6 +318,13 @@ def _parse_email(raw, filename):
+         total_text_chars += len(text)
+         if total_text_chars > MAX_TEXT_CHARS:
+             raise ValueError("Decoded text limit exceeded; this file was not ingested.")
++        fingerprint_parts.append(
++            (content_type, digest(" ".join(URL_PATTERN.sub("\x00", text).split()).encode("utf-8")))
++        )
++        fingerprint_urls.extend(
++            html_entities.unescape(match[0]) if content_type == "text/html" else match[0]
++            for match in URL_PATTERN.finditer(text)
++        )
+         record["parts"].append(
+             {"location": location, "content_type": content_type, "characters": len(text)}
+         )
+@@ -357,6 +370,7 @@ def _parse_email(raw, filename):
+                 raise ValueError("MIME structure limit exceeded; this file was not ingested.")
+             if part.get_content_type() == "message/rfc822":
+                 content_parts.append(("message/rfc822", digest(part.as_bytes())))
++                fingerprint_parts.append(("message/rfc822", digest(part.as_bytes())))
+                 warn(
+                     "embedded_message",
+                     "Attached message retained in source; not attributed to the outer message.",
+@@ -381,6 +395,7 @@ def _parse_email(raw, filename):
+                 filename = part.get_filename()
+                 disposition = part.get_content_disposition()
+                 if filename or disposition == "attachment" or not content_type.startswith("text/"):
++                    fingerprint_parts.append((content_type, digest(payload)))
+                     inline_resource = content_type.startswith("image/") and (
+                         disposition == "inline"
+                         or (disposition != "attachment" and bool(part.get("Content-ID")))
+@@ -418,6 +433,7 @@ def _parse_email(raw, filename):
+                         )
+                     extract_text(text, content_type, location)
+                 else:
++                    fingerprint_parts.append((content_type, digest(payload)))
+                     warn(
+                         "unsupported_text_part",
+                         f"{content_type} retained but not searched for URLs.",
+@@ -493,6 +509,9 @@ def _parse_email(raw, filename):
+                 data = attachment.data
+                 if isinstance(data, bytes):
+                     content_parts.append((attachment.mimetype or "application/octet-stream", digest(data)))
++                    fingerprint_parts.append(
++                        (attachment.mimetype or "application/octet-stream", digest(data))
++                    )
+                     artifact(
+                         "attachment_sha256",
+                         digest(data),
+@@ -510,6 +529,10 @@ def _parse_email(raw, filename):
+                         location,
+                     )
+             record["content_digest"] = object_digest(content_parts)
++    record["copy_fingerprint"] = {
++        "structure": object_digest(fingerprint_parts),
++        "urls": fingerprint_urls,
++    }
+     record["body_preview"] = record["body_preview"][:12000]
+     record["artifacts"].sort(key=lambda a: (a["kind"], a["value"], a["location"]))
+     return record
+diff --git a/src/etrace/static/app.js b/src/etrace/static/app.js
+index 2c1a60e..d5087fa 100644
+--- a/src/etrace/static/app.js
++++ b/src/etrace/static/app.js
+@@ -975,16 +975,27 @@ $("analyze-open").addEventListener("click", () => {
+   // The organisation domain is a scoping decision: suggest it, never apply it silently.
+   const suggestion =
+     (state.summary && state.summary.suggested_organisation_domains) || [];
+-  $("organisation-suggestion").textContent =
+-    suggestion.length === 1
+-      ? `Suggested from this evidence: ${suggestion[0]}. Confirm it is the investigated organisation (not a supplier) before running; clear the field to ignore it.`
+-      : suggestion.length > 1
+-        ? `Several domains fit equally (${suggestion.join(", ")}), for example both sides of a supplier conversation. Enter only the investigated organisation's domain.`
+-        : "No organisation domain could be suggested from this evidence. Enter it if links to your own organisation should be ignored.";
++  // Nothing is entered on the investigator's behalf: a suggestion is applied only
++  // when they choose it or type a domain themselves.
+   const field = $("organisation-domains");
+-  // Pre-fill only an unambiguous suggestion; never pre-fill a possible supplier.
+-  if (!field.dataset.edited && !field.value && suggestion.length === 1)
+-    field.value = suggestion[0];
++  const hint = $("organisation-suggestion");
++  if (!suggestion.length) {
++    hint.replaceChildren(
++      "No organisation domain could be suggested from this evidence. Enter it if links to your own organisation should be ignored.",
++    );
++  } else {
++    hint.replaceChildren(
++      `Suggested from this evidence: ${suggestion.join(", ")}. Check it is the investigated organisation, not a supplier, before using it. `,
++      button(
++        "Use suggested domain",
++        () => {
++          field.value = suggestion.join(", ");
++          field.dataset.edited = "true";
++        },
++        "text-button",
++      ),
++    );
++  }
+   $("analysis-dialog").showModal();
+ });
+ $("filters").addEventListener("submit", (event) => {
+diff --git a/tests/test_correlation.py b/tests/test_correlation.py
+index adc7b2c..aae153b 100644
+--- a/tests/test_correlation.py
++++ b/tests/test_correlation.py
+@@ -27,10 +27,12 @@ def email(
+     when=None,
+     sender="alice@example.org",
+     headers=(),
++    html=None,
++    recipient="bob@example.org",
+ ):
+     message = EmailMessage()
+     message["From"] = sender
+-    message["To"] = "bob@example.org"
++    message["To"] = recipient
+     message["Date"] = (when or DATE).strftime("%a, %d %b %Y %H:%M:%S %z")
+     message["Subject"] = subject
+     message["Message-ID"] = message_id or f"<{name}@example.org>"
+@@ -41,6 +43,8 @@ def email(
+     for header, value in headers:
+         message[header] = value
+     message.set_content(body)
++    if html is not None:
++        message.add_alternative(html, subtype="html")
+     for filename, data, disposition in attachments:
+         message.add_attachment(
+             data,
+@@ -126,6 +130,63 @@ class CorrelationTests(unittest.TestCase):
+         self.assertFalse(any(e["type"] == "reply" for e in result["events"]))
+         self.assertTrue(any(d["code"] == "ambiguous_parent" for d in result["diagnostics"]))
+ 
++    def _parent_case(self, sent_kwargs, inbox_kwargs):
++        parent_id = "<markup@example.org>"
++        sent = email("sent", message_id=parent_id, **sent_kwargs)
++        inbox = email("inbox", message_id=parent_id, **inbox_kwargs)
++        child = email("child", subject="Re: Update", parent=parent_id)
++        return analyze([sent, inbox, child])
++
++    def assert_ambiguous(self, result):
++        self.assertEqual(result["statistics"]["copy_groups"], 0)
++        self.assertFalse(any(e["type"] == "reply" for e in result["events"]))
++        self.assertTrue(any(d["code"] == "ambiguous_parent" for d in result["diagnostics"]))
++
++    def test_hidden_html_field_change_stays_ambiguous(self):
++        text = "Please settle the statement via our portal by Friday. Regards, Accounts."
++        form = (
++            '<html><body><p>Please settle the statement via our portal by Friday.</p>'
++            '<form action="https://portal.vendor.example/pay">'
++            '<input type="hidden" name="acct" value="{}"><button>Pay</button></form></body></html>'
++        )
++        result = self._parent_case(
++            {"body": text, "html": form.format("111111")}, {"body": text, "html": form.format("999999")}
++        )
++        self.assert_ambiguous(result)
++
++    def test_html_comment_or_attribute_change_stays_ambiguous(self):
++        text = "Statement attached. Regards, Accounts."
++        for left, right in (
++            ("<p>Statement attached.</p><!-- ref A -->", "<p>Statement attached.</p><!-- ref B -->"),
++            ('<p class="a">Statement attached.</p>', '<p class="b">Statement attached.</p>'),
++        ):
++            with self.subTest(left=left):
++                self.assert_ambiguous(self._parent_case({"body": text, "html": left}, {"body": text, "html": right}))
++
++    def test_reordered_links_stay_ambiguous(self):
++        first, second = "https://portal.vendor.example/a", "https://portal.vendor.example/b"
++        self.assert_ambiguous(
++            self._parent_case(
++                {"body": f"Invoice: {first} Receipt: {second}"},
++                {"body": f"Invoice: {second} Receipt: {first}"},
++            )
++        )
++
++    def test_safe_links_html_copy_with_rewritten_href_is_grouped(self):
++        original = "https://portal.vendor.example/pay?invoice=10391&amp;ref=7"
++        wrapped = (
++            "https://apc01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fportal.vendor.example"
++            "%2Fpay%3Finvoice%3D10391%26ref%3D7&amp;data=05%7C02%7Cbob%40example.org%7Cabc&amp;reserved=0"
++        )
++        page = '<html><body><p>Statement ready.</p><a href="{}">View statement</a></body></html>'
++        text = "Statement ready. View statement: {}"
++        result = self._parent_case(
++            {"body": text.format(original.replace("&amp;", "&")), "html": page.format(original)},
++            {"body": text.format(wrapped.replace("&amp;", "&")), "html": page.format(wrapped)},
++        )
++        self.assertEqual(result["statistics"]["copy_groups"], 1)
++        self.assertEqual(sum(e["type"] == "reply" for e in result["events"]), 1)
++
+     def test_unwrap_url_recognises_only_known_wrappers(self):
+         self.assertEqual(unwrap_url("https://apc01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fportal.vendor.example%2Fpay&data=05%7C02%7Cbob%40example.org%7Cabc123&reserved=0"), "https://portal.vendor.example/pay")
+         self.assertEqual(
+@@ -250,6 +311,26 @@ class CorrelationTests(unittest.TestCase):
+         self.assertEqual(result["statistics"]["organisation_domains"], [])
+         self.assertEqual(result["statistics"]["coordination_pairs"], 1)
+ 
++    def test_supplier_heavy_conversation_does_not_suggest_the_supplier(self):
++        # Three messages company -> vendor and one reply: the vendor receives 75% of
++        # the mail but the company sends most of it, so nothing is suggested.
++        records = [
++            email(f"out{i}", body="https://portal.vendor.example/statement/77", sender="priya@halcyon.example",
++                  recipient="ar@vendor.example", when=DATE + timedelta(minutes=10 * i))
++            for i in range(3)
++        ] + [
++            email("in0", body="https://portal.vendor.example/statement/77", sender="ar@vendor.example",
++                  recipient="priya@halcyon.example", when=DATE + timedelta(minutes=30))
++        ]
++        self.assertEqual(suggest_organisation_domains(records), [])
++        self.assertEqual(analyze(records)["statistics"]["coordination_pairs"], 6)
++        # A tie between two domains also yields no suggestion.
++        tie = records[:2] + [
++            email(f"in{i}", body="x", sender="ar@vendor.example", recipient="priya@halcyon.example")
++            for i in range(1, 3)
++        ]
++        self.assertEqual(suggest_organisation_domains(tie), [])
++
+     def test_excluded_domains_are_listed(self):
+         other = [
+             email("ext-a", subject="Same", body="https://company.example/home"),

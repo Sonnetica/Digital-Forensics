@@ -12,6 +12,7 @@ from itertools import combinations
 from pathlib import Path
 
 RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
+RULE_VERSION = "1.4.1"  # Declares the rule definitions used by generated conformance labels.
 TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
 
 
@@ -330,6 +331,7 @@ def generate(output, tier="simple", seed=47, noise=None, start=None):
         )
     truth = {
         "schema_version": 1,
+        "rule_version": RULE_VERSION if tier != "challenge" else "intent",
         "seed": seed,
         "start_utc": base.isoformat(),
         "tier": tier,
@@ -337,6 +339,11 @@ def generate(output, tier="simple", seed=47, noise=None, start=None):
             "window_seconds": 3600,
             "minimum_signals": 2,
             "timestamp_source": "date",
+            "background_min_outside": 10,
+            "background_ratio": 5.0,
+            "organisation_domains": [],
+            "excluded_url_domains": [],
+            "trusted_wrapper_hosts": [],
         },
         "files": manifest,
         "duplicate_acquisitions": aliases,

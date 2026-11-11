@@ -43,7 +43,7 @@
         <p>
           Evidence stays on this computer.<br />All displayed times are UTC.
         </p>
-        <span class="version">E-TRACE / 1.0.0</span>
+        <span class="version">E-TRACE / {{ version }}</span>
       </div>
     </aside>
     <main>
@@ -127,6 +127,7 @@
                 <option value="">All relationships</option>
                 <option value="attachment_reuse">Attachment reuse</option>
                 <option value="url_reuse">URL reuse</option>
+                <option value="inline_resource_reuse">Inline image reuse</option>
                 <option value="reply">Reply relationship</option>
                 <option value="possible_coordination">
                   Possible coordination
@@ -139,6 +140,10 @@
             <label class="event-filter hidden"
               >To UTC<input id="end-filter" type="date"
             /></label>
+            <label class="graph-filter hidden"
+              ><input id="graph-coordination" type="checkbox" /> Show coordination
+              clusters</label
+            >
             <button class="button secondary" type="submit">Apply</button
             ><button id="clear-filters" class="text-button" type="button">
               Reset
@@ -220,13 +225,50 @@
             <option value="3">3 categories</option>
             <option value="4">4 categories</option>
           </select></label
-        ><label
+          ><label
           >Time source<select id="timestamp-source">
             <option value="date">Date header (claimed send time)</option>
             <option value="received">
               Top Received header (claimed receipt time)
             </option>
           </select></label
+          ><label
+          >Routine background: minimum occurrences outside a pair's window<input
+            id="background-min-outside"
+            type="number"
+            min="1"
+            max="1000000"
+            value="10"
+            required /></label
+          ><label
+          >Routine background: outside-to-inside ratio<input
+            id="background-ratio"
+            type="number"
+            min="1"
+            max="1000"
+            step="0.5"
+            value="5"
+            required /></label
+          ><label
+          >Investigated organisation's own domains (confirm; comma separated)<input
+            id="organisation-domains"
+            type="text"
+            placeholder="company.example"
+            autocomplete="off" /></label
+        >
+        <p id="organisation-suggestion" class="muted"></p>
+        <label
+          >Additional trusted link-protection hosts (comma separated; normally empty)<input
+            id="trusted-wrapper-hosts"
+            type="text"
+            placeholder="Microsoft Safe Links and Proofpoint are built in"
+            autocomplete="off" /></label
+          ><label
+          >Exclude URL domains from coordination (comma separated)<input
+            id="excluded-url-domains"
+            type="text"
+            placeholder="example.org, mail.example.org"
+            autocomplete="off" /></label
         >
         <p class="muted">
           Header times are not independently verified. Unknown times are

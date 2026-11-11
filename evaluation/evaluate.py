@@ -13,7 +13,7 @@ from itertools import combinations
 from pathlib import Path
 
 from etrace.correlate import analyze
-from etrace.model import RULES, RuleConfig
+from etrace.model import RULE_VERSION, RULES, RuleConfig
 from etrace.parser import parse_email
 
 PAIR_LIMIT = 2_000_000
@@ -33,8 +33,12 @@ def prediction_pairs(result):
     predicted = {rule: set() for rule in RULES}
     for event in result["events"]:
         rule = event["type"]
+        if rule not in predicted:
+            continue  # informational event types (inline resource reuse) are not scored
         if rule == "reply":
             predicted[rule].add((event["direction"]["parent"], event["direction"]["child"]))
+        elif rule == "possible_coordination" and "pairs" in event:
+            predicted[rule].update(tuple(pair["email_ids"]) for pair in event["pairs"])
         else:
             count = len(event["email_ids"])
             if count * (count - 1) // 2 > PAIR_LIMIT:
@@ -138,17 +142,53 @@ def evaluate(dataset, config=None, reviews=None):
         peak_bytes = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    predicted = prediction_pairs(result)
+    # Score logical messages: every preserved copy of one message maps to the
+    # representative identifier the engine uses for that copy group.
+    representative = {i: i for i in file_ids.values()}
+    for group in result.get("copy_groups", []):
+        for evidence_id in group:
+            representative[evidence_id] = min(group)
+
+    def logical(pairs, rule):
+        mapped = set()
+        for a, b in pairs:
+            a, b = representative[a], representative[b]
+            if a != b:
+                mapped.add((a, b) if rule == "reply" else tuple(sorted((a, b))))
+        return mapped
+
+    file_predicted = prediction_pairs(result)
+    predicted = {rule: logical(pairs, rule) for rule, pairs in file_predicted.items()}
+    file_expected, file_negatives, file_complete = {}, {}, {}
     expected, negatives, complete = {}, {}, {}
+    filenames = {value: name for name, value in file_ids.items()}
+    conflicts_found = []
     for rule, pairs in truth["relationships"].items():
-        expected[rule] = named_pairs(pairs, rule, file_ids)
-        negatives[rule] = named_pairs(
+        file_expected[rule] = named_pairs(pairs, rule, file_ids)
+        file_negatives[rule] = named_pairs(
             truth.get("negative_relationships", {}).get(rule, []), rule, file_ids
         )
         names = truth["complete_for"][rule] if truth["schema_version"] == 2 else list(file_ids)
         if any(name not in file_ids for name in names) or len(set(names)) != len(names):
             raise ValueError("Invalid complete assessment scope.")
-        complete[rule] = {file_ids[name] for name in names}
+        file_complete[rule] = {file_ids[name] for name in names}
+        expected[rule] = logical(file_expected[rule], rule)
+        negatives[rule] = logical(file_negatives[rule], rule)
+        for pair in sorted(expected[rule] & negatives[rule]):
+            positive = sorted(p for p in file_expected[rule] if logical([p], rule) == {pair})
+            negative = sorted(p for p in file_negatives[rule] if logical([p], rule) == {pair})
+            conflicts_found.append(
+                f"{rule}: positive {[[filenames[i] for i in p] for p in positive]} "
+                f"and negative {[[filenames[i] for i in p] for p in negative]}"
+            )
+        complete[rule] = {representative[i] for i in file_complete[rule]}
+    if conflicts_found:
+        # Copies of one message cannot be both related and unrelated to the same
+        # message. Scoring such labels would report a misleading result.
+        raise ValueError(
+            "Ground-truth labels conflict once preserved copies are grouped as one message; "
+            "correct the labels before scoring: " + "; ".join(conflicts_found)
+        )
     review_metadata = []
     if reviews is not None:
         review_data = json.loads(Path(reviews).read_text(encoding="utf-8"))
@@ -164,8 +204,8 @@ def evaluate(dataset, config=None, reviews=None):
             rule = entry["rule"]
             if rule not in RULES:
                 raise ValueError("Invalid reviewed rule.")
-            pairs = named_pairs([entry["files"]], rule, file_ids)
-            if not pairs <= predicted[rule]:
+            pairs = logical(named_pairs([entry["files"]], rule, file_ids), rule)
+            if not pairs or not pairs <= predicted[rule]:
                 raise ValueError("Review queue accepts only predictions from the specified run.")
             pair = next(iter(pairs))
             if pair[0] in complete[rule] and pair[1] in complete[rule]:
@@ -173,11 +213,19 @@ def evaluate(dataset, config=None, reviews=None):
             (expected if entry["label"] == "positive" else negatives)[rule].update(pairs)
             review_metadata.append(entry)
     n = len(records)
-    per_rule, assessed = {}, {}
+    logical_n = len(set(representative.values()))
+    per_rule, assessed, file_level = {}, {}, {}
     for rule in RULES:
         per_rule[rule], assessed[rule] = scoped_metrics(
             expected[rule], negatives[rule], predicted[rule], complete[rule], rule == "reply"
         )
+        file_level[rule] = scoped_metrics(
+            file_expected[rule],
+            file_negatives[rule],
+            file_predicted[rule],
+            file_complete[rule],
+            rule == "reply",
+        )[0]
     micro = summarize(*(sum(m[key] for m in per_rule.values()) for key in ("tp", "fp", "fn", "tn")))
 
     # This baseline deliberately requires only one reused payload category and
@@ -201,10 +249,10 @@ def evaluate(dataset, config=None, reviews=None):
                 and b in times
                 and abs((times[a] - times[b]).total_seconds()) <= config.window_seconds
             ):
-                baseline.add((a, b))
+                if representative[a] != representative[b]:
+                    baseline.add(tuple(sorted((representative[a], representative[b]))))
                 if len(baseline) > PAIR_LIMIT:
                     raise ValueError("Baseline pairwise evaluation limit exceeded.")
-    filenames = {value: name for name, value in file_ids.items()}
     errors = {
         rule: {
             "false_positives": [
@@ -238,17 +286,25 @@ def evaluate(dataset, config=None, reviews=None):
         "tier": truth["tier"],
         "seed": truth["seed"],
         "messages": n,
+        "logical_messages": logical_n,
+        "scoring_unit": "logical_message",
+        "copy_groups": [
+            sorted(filenames[i] for i in group) for group in result.get("copy_groups", [])
+        ],
         "run_id": result["id"],
         "config": config.as_dict(),
         "matches_reference_parameters": all(
             config.as_dict()[k] == v for k, v in truth["expected_parameters"].items()
         ),
+        "rule_definition_compatible": truth.get("rule_version", "1.0.0") == RULE_VERSION,
         "per_rule": per_rule,
         "micro": micro,
+        "file_level_per_rule": file_level,
         "assessment": {
-            "fully_labelled": all(len(complete[rule]) == n for rule in RULES),
+            "fully_labelled": all(len(complete[rule]) == logical_n for rule in RULES),
+            "rule_definition_compatible": truth.get("rule_version", "1.0.0") == RULE_VERSION,
             "unassessed_predictions": sum(m["unassessed_predictions"] for m in per_rule.values()),
-            "interpretation": "Metrics apply only to explicitly assessed pairs and declared complete scopes. Unassessed predictions are excluded, never assumed false. Reviewed predictions alone do not establish population recall.",
+            "interpretation": "Metrics apply only to explicitly assessed pairs and declared complete scopes. Unassessed predictions are excluded, never assumed false. Reviewed predictions alone do not establish population recall. Rule definitions must match before treating precision or recall as a current-rule benchmark.",
             "reviews": review_metadata,
         },
         "errors": errors,
@@ -279,7 +335,8 @@ def evaluate(dataset, config=None, reviews=None):
         "review_queue": review_queue,
         "definitions": {
             "candidate_universe": "All distinct pairs within each rule's complete scope, plus explicitly labelled pairs outside it. Ordered for reply, unordered otherwise. Background pairs without labels are unknown.",
-            "group_scoring": "Artifact groups expand to unordered pairs; each pair counts once per rule.",
+            "group_scoring": "Reuse groups expand to unordered pairs; coordination clusters score only their explicitly supported pairs. Each pair counts once per rule.",
+            "scoring_unit": "Labels and predictions are mapped onto the run's copy groups (the same message preserved in several mailboxes) and scored per logical message. Pairs between copies of one message are dropped. file_level_per_rule repeats the scoring per preserved file for comparison.",
             "undefined_ratios": "null when a metric denominator is zero.",
             "baseline": "Single shared URL or attachment within the selected window; no reply-thread exclusion. This is an internal ablation, not an external product comparison.",
             "review_queue": "Up to 20 uniformly sampled unassessed predictions per rule using seed 47. Inspect originals independently and enter positive/negative labels with reviewer and rationale. Coordination review concerns observable rule support, not malicious intent. Sampling predicted pairs cannot establish global recall.",
@@ -295,6 +352,11 @@ def main():
     parser.add_argument("--window-seconds", type=int, default=3600)
     parser.add_argument("--minimum-signals", type=int, default=2)
     parser.add_argument("--timestamp-source", choices=("date", "received"), default="date")
+    parser.add_argument("--background-min-outside", type=int, default=10)
+    parser.add_argument("--background-ratio", type=float, default=5.0)
+    parser.add_argument("--organisation-domain", action="append", default=[])
+    parser.add_argument("--trusted-wrapper-host", action="append", default=[])
+    parser.add_argument("--exclude-url-domain", action="append", default=[])
     parser.add_argument(
         "--reviews",
         type=Path,
@@ -307,7 +369,16 @@ def main():
             raise ValueError("Keep evaluation results outside the source repository.")
         result = evaluate(
             args.dataset,
-            RuleConfig(args.window_seconds, args.minimum_signals, args.timestamp_source),
+            RuleConfig(
+                window_seconds=args.window_seconds,
+                minimum_signals=args.minimum_signals,
+                timestamp_source=args.timestamp_source,
+                background_min_outside=args.background_min_outside,
+                background_ratio=args.background_ratio,
+                organisation_domains=args.organisation_domain,
+                excluded_url_domains=args.exclude_url_domain,
+                trusted_wrapper_hosts=args.trusted_wrapper_host,
+            ),
             args.reviews,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -319,9 +390,11 @@ def main():
                 {
                     "output": str(output),
                     "messages": result["messages"],
+                    "logical_messages": result["logical_messages"],
                     "per_rule": result["per_rule"],
                     "micro": result["micro"],
                     "assessment": result["assessment"],
+                    "rule_definition_compatible": result["rule_definition_compatible"],
                     "performance": result["performance"],
                 },
                 indent=2,

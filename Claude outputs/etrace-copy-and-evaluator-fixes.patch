@@ -1,0 +1,232 @@
+diff --git a/README.md b/README.md
+index f372e67..f7fe119 100644
+--- a/README.md
++++ b/README.md
+@@ -114,7 +114,10 @@ the run diagnostics, so no single edge is presented as the only parent.
+ Transport-header variants are grouped as copies when their single Message-ID,
+ sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+ decoded content digest matches or sufficiently long visible bodies are similar
+-and payload hashes agree. Groups with differing full content are marked provisional
++and both payload hashes and extracted URLs agree. Files whose links differ, such as
++a genuine and an altered payment URL behind shared boilerplate, are never grouped;
++a reply to their shared Message-ID stays an ambiguous parent. Mailbox copies that a
++gateway rewrote (for example link-protection wrappers) therefore remain separate. Groups with differing full content are marked provisional
+ in reply context. Every raw file and SHA-256 remains separate evidence. Reused
+ Message-IDs with materially different content remain ambiguous. Inline MIME resources are recorded as
+ `inline_resource_sha256`, reported as inline image reuse, and never used as
+@@ -122,7 +125,10 @@ coordination signals. In cases with at least `--common-artifact-min-case-message
+ distinct messages (default 200), coordination also ignores artifacts present in
+ more than the configured share of logical messages once the configured minimum
+ count is reached. Smaller, focused cases keep every signal, because a campaign may
+-legitimately dominate a targeted evidence selection. Each value removed by the
++legitimately dominate a targeted evidence selection. Below the case minimum the
++filter does not run at all (the run statistics report
++`common_artifact_filter_active: false`); use `--exclude-url-domain` for routine
++organisational links in smaller cases. Each value removed by the
+ share filter or by an excluded URL domain is listed as a
+ `coordination_signal_suppressed` diagnostic with its kind, value, message count
+ and source files. Exclusions apply to coordination only; exact URL and attachment
+@@ -181,7 +187,9 @@ for version 1.1.0 and review any external corpus labels against the new rule tab
+ The evaluator scores logical messages. Labels and predictions are mapped onto the
+ run's copy groups, pairs between copies of one message are dropped, and the
+ result lists each copy group by filename. `file_level_per_rule` repeats the
+-scoring per preserved file for comparison. The filter options
++scoring per preserved file for comparison. If grouping maps a positive and a
++negative label onto the same pair, the labels contradict each other and the
++evaluator stops with exit status 2, naming the conflicting files, instead of scoring. The filter options
+ (`--max-artifact-share`, `--common-artifact-min-messages`,
+ `--common-artifact-min-case-messages`, `--exclude-url-domain`) are available for
+ separately reported sensitivity experiments.
+diff --git a/evaluation/evaluate.py b/evaluation/evaluate.py
+index 33ab3da..0761f58 100644
+--- a/evaluation/evaluate.py
++++ b/evaluation/evaluate.py
+@@ -161,7 +161,8 @@ def evaluate(dataset, config=None, reviews=None):
+     predicted = {rule: logical(pairs, rule) for rule, pairs in file_predicted.items()}
+     file_expected, file_negatives, file_complete = {}, {}, {}
+     expected, negatives, complete = {}, {}, {}
+-    label_conflicts = 0
++    filenames = {value: name for name, value in file_ids.items()}
++    conflicts_found = []
+     for rule, pairs in truth["relationships"].items():
+         file_expected[rule] = named_pairs(pairs, rule, file_ids)
+         file_negatives[rule] = named_pairs(
+@@ -173,10 +174,21 @@ def evaluate(dataset, config=None, reviews=None):
+         file_complete[rule] = {file_ids[name] for name in names}
+         expected[rule] = logical(file_expected[rule], rule)
+         negatives[rule] = logical(file_negatives[rule], rule)
+-        conflicts = expected[rule] & negatives[rule]
+-        label_conflicts += len(conflicts)
+-        negatives[rule] -= conflicts
++        for pair in sorted(expected[rule] & negatives[rule]):
++            positive = sorted(p for p in file_expected[rule] if logical([p], rule) == {pair})
++            negative = sorted(p for p in file_negatives[rule] if logical([p], rule) == {pair})
++            conflicts_found.append(
++                f"{rule}: positive {[[filenames[i] for i in p] for p in positive]} "
++                f"and negative {[[filenames[i] for i in p] for p in negative]}"
++            )
+         complete[rule] = {representative[i] for i in file_complete[rule]}
++    if conflicts_found:
++        # Copies of one message cannot be both related and unrelated to the same
++        # message. Scoring such labels would report a misleading result.
++        raise ValueError(
++            "Ground-truth labels conflict once preserved copies are grouped as one message; "
++            "correct the labels before scoring: " + "; ".join(conflicts_found)
++        )
+     review_metadata = []
+     if reviews is not None:
+         review_data = json.loads(Path(reviews).read_text(encoding="utf-8"))
+@@ -241,7 +253,6 @@ def evaluate(dataset, config=None, reviews=None):
+                     baseline.add(tuple(sorted((representative[a], representative[b]))))
+                 if len(baseline) > PAIR_LIMIT:
+                     raise ValueError("Baseline pairwise evaluation limit exceeded.")
+-    filenames = {value: name for name, value in file_ids.items()}
+     errors = {
+         rule: {
+             "false_positives": [
+@@ -291,7 +302,6 @@ def evaluate(dataset, config=None, reviews=None):
+         "file_level_per_rule": file_level,
+         "assessment": {
+             "fully_labelled": all(len(complete[rule]) == logical_n for rule in RULES),
+-            "label_conflicts_after_copy_grouping": label_conflicts,
+             "rule_definition_compatible": truth.get("rule_version", "1.0.0") == RULE_VERSION,
+             "unassessed_predictions": sum(m["unassessed_predictions"] for m in per_rule.values()),
+             "interpretation": "Metrics apply only to explicitly assessed pairs and declared complete scopes. Unassessed predictions are excluded, never assumed false. Reviewed predictions alone do not establish population recall. Rule definitions must match before treating precision or recall as a current-rule benchmark.",
+diff --git a/src/etrace/correlate.py b/src/etrace/correlate.py
+index abd52e4..34e8066 100644
+--- a/src/etrace/correlate.py
++++ b/src/etrace/correlate.py
+@@ -51,14 +51,21 @@ def analyze(records, config=None):
+             if a["kind"] in ("attachment_sha256", "inline_resource_sha256")
+         }
+ 
++    def url_values(record):
++        return {a["value"] for a in record["artifacts"] if a["kind"] == "url"}
++
+     def compatible_copy(left, right):
+         if left["content_digest"] == right["content_digest"]:
+             return True
+         a, b = left["body_preview"], right["body_preview"]
++        # When decoded content differs, every substantive artifact must still agree.
++        # Shared boilerplate must never merge two files whose links differ (for
++        # example a genuine and an altered payment URL); those stay ambiguous.
+         return (
+             100 <= min(len(a), len(b))
+             and max(len(a), len(b)) < 12000
+             and payload_hashes(left) == payload_hashes(right)
++            and url_values(left) == url_values(right)
+             and SequenceMatcher(None, a, b).ratio() >= 0.5
+         )
+ 
+diff --git a/src/etrace/web.py b/src/etrace/web.py
+index 14bb6d3..7e10718 100644
+--- a/src/etrace/web.py
++++ b/src/etrace/web.py
+@@ -232,7 +232,7 @@ def create_app(case_path):
+     def events():
+         items, records, result = filtered_events()
+         summaries = [
+-            {k: v for k, v in e.items() if k not in ("support", "context")}
++            {k: v for k, v in e.items() if k not in ("support", "context", "pairs")}
+             | {
+                 "context_count": len(e["context"]),
+                 "support_count": len(e["support"]),
+diff --git a/tests/test_case_web.py b/tests/test_case_web.py
+index 46f91b9..86addac 100644
+--- a/tests/test_case_web.py
++++ b/tests/test_case_web.py
+@@ -103,6 +103,11 @@ class CaseAndWebTests(unittest.TestCase):
+             self.assertEqual(shown["total_events"], 2)
+             events = client.get("/api/events?type=possible_coordination").get_json()
+             self.assertEqual(events["items"][0]["pair_count"], 1)
++            # The list view stays light; pairwise support loads with the detail view.
++            self.assertNotIn("pairs", events["items"][0])
++            detail = client.get(f"/api/events/{events['items'][0]['id']}").get_json()
++            self.assertEqual(len(detail["pairs"]), 1)
++            self.assertTrue(detail["pairs"][0]["support"])
+             inline = client.get("/api/events?type=inline_resource_reuse")
+             self.assertEqual(inline.status_code, 200)
+             self.assertEqual(client.get("/api/events?type=unknown").status_code, 400)
+diff --git a/tests/test_correlation.py b/tests/test_correlation.py
+index ad24400..8a18031 100644
+--- a/tests/test_correlation.py
++++ b/tests/test_correlation.py
+@@ -74,6 +74,22 @@ class CorrelationTests(unittest.TestCase):
+         self.assertTrue(any(c["code"] == "copy_content_variation" for c in replies[0]["context"]))
+         self.assertTrue(any(d["code"] == "copy_content_variation" for d in result["diagnostics"]))
+ 
++    def test_shared_boilerplate_with_different_links_stays_ambiguous(self):
++        parent_id = "<remittance@example.org>"
++        boilerplate = (
++            "Dear Accounts Payable, please find our remittance instructions below. Kindly process "
++            "the outstanding balance by Friday. Regards, Accounts Receivable. "
++        ) * 2
++        genuine = email("genuine", message_id=parent_id, body=boilerplate + "Pay: https://pay.vendor.example/inv/10391")
++        altered = email("altered", message_id=parent_id, body=boilerplate + "Pay: https://pay-vendor.example/inv/10391")
++        child = email("child", subject="Re: Update", parent=parent_id)
++        result = analyze([genuine, altered, child])
++        self.assertEqual(result["statistics"]["copy_groups"], 0)
++        self.assertFalse(any(e["type"] == "reply" for e in result["events"]))
++        ambiguous = [d for d in result["diagnostics"] if d["code"] == "ambiguous_parent"]
++        self.assertEqual(len(ambiguous), 1)
++        self.assertEqual(set(ambiguous[0]["candidates"]), {genuine["id"], altered["id"]})
++
+     def test_copies_do_not_coordinate(self):
+         first = email("sent", body="https://example.net/task", mailbox="sent")
+         second = email("inbox", message_id="<sent@example.org>", body="https://example.net/task", mailbox="inbox")
+diff --git a/tests/test_evaluate.py b/tests/test_evaluate.py
+index 25f9bc1..5a81e0e 100644
+--- a/tests/test_evaluate.py
++++ b/tests/test_evaluate.py
+@@ -31,16 +31,44 @@ def raw(message_id, *, mailbox, parent=None, subject="Plan"):
+ 
+ 
+ class EvaluateTests(unittest.TestCase):
+-    def test_reply_labelled_against_any_copy_scores_once(self):
++    def _copy_dataset(self, folder):
++        files = {
++            "parent-sent.eml": raw("<p@example.org>", mailbox="sent"),
++            "parent-inbox.eml": raw("<p@example.org>", mailbox="inbox"),
++            "child.eml": raw("<c@example.org>", mailbox="inbox", parent="<p@example.org>", subject="Re: Plan"),
++        }
++        for name, data in files.items():
++            (folder / name).write_bytes(data)
++        return files
++
++    def test_conflicting_labels_after_copy_grouping_are_rejected(self):
+         with tempfile.TemporaryDirectory() as directory:
+             folder = Path(directory)
+-            files = {
+-                "parent-sent.eml": raw("<p@example.org>", mailbox="sent"),
+-                "parent-inbox.eml": raw("<p@example.org>", mailbox="inbox"),
+-                "child.eml": raw("<c@example.org>", mailbox="inbox", parent="<p@example.org>", subject="Re: Plan"),
++            files = self._copy_dataset(folder)
++            rules = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
++            truth = {
++                "schema_version": 2,
++                "rule_version": "1.1.0",
++                "tier": "conflict-test",
++                "seed": 1,
++                "expected_parameters": {},
++                "files": {name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
++                "relationships": {rule: [] for rule in rules}
++                | {"reply": [["parent-inbox.eml", "child.eml"]]},
++                # The Sent copy is the same message, so this negative contradicts the positive.
++                "negative_relationships": {rule: [] for rule in rules}
++                | {"reply": [["parent-sent.eml", "child.eml"]]},
++                "complete_for": {rule: list(files) for rule in rules},
++                "scope": "test",
+             }
+-            for name, data in files.items():
+-                (folder / name).write_bytes(data)
++            (folder / "ground_truth.json").write_text(json.dumps(truth), encoding="utf-8")
++            with self.assertRaisesRegex(ValueError, "parent-sent.eml.*child.eml"):
++                evaluate_module.evaluate(folder)
++
++    def test_reply_labelled_against_any_copy_scores_once(self):
++        with tempfile.TemporaryDirectory() as directory:
++            folder = Path(directory)
++            files = self._copy_dataset(folder)
+             truth = {
+                 "schema_version": 1,
+                 "rule_version": "1.1.0",

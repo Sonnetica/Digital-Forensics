@@ -11,9 +11,10 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, render_template, request, send_file, session
 from werkzeug.exceptions import HTTPException
 
+from . import __version__
 from .case import Case
-from .correlate import analyze
-from .model import MAX_FILE_BYTES, RULES, RuleConfig, object_digest
+from .correlate import analyze, suggest_organisation_domains
+from .model import EVENT_TYPES, MAX_FILE_BYTES, RuleConfig
 
 
 def brief(record):
@@ -90,26 +91,40 @@ def create_app(case_path):
     @app.get("/")
     def home():
         session.setdefault("csrf", secrets.token_hex(32))
-        return render_template("index.html", csrf=session["csrf"], case_name=case.summary()["name"])
+        return render_template(
+            "index.html",
+            csrf=session["csrf"],
+            case_name=case.summary()["name"],
+            version=__version__,
+        )
 
     @app.get("/api/case")
     def summary():
         result = case.run()
+        run_id = request.args.get("run") or None
+        selected = case.run(run_id) if run_id else result
+        if run_id and selected is None:
+            abort(404, "Analysis run not found.")
         info = case.summary()
         records = case.records()
         info["warnings"] = sum(len(r["warnings"]) for r in records)
         info["undated"] = sum(r["date_utc"] is None for r in records)
-        info["latest_run"] = (
-            None
-            if result is None
-            else {
-                "id": result["id"],
-                "statistics": result["statistics"],
-                "config": result["config"],
-                "counts": dict(Counter(e["type"] for e in result["events"])),
-                "stale": result["evidence_digest"]
-                != object_digest(sorted(r["id"] for r in records)),
+        info["suggested_organisation_domains"] = suggest_organisation_domains(records)
+        def describe(run):
+            return {
+                "id": run["id"],
+                "statistics": run["statistics"],
+                "config": run["config"],
+                "counts": dict(Counter(e["type"] for e in run["events"])),
+                **case.run_status(run, records),
             }
+
+        info["latest_run"] = None if result is None else describe(result)
+        # Summary cards follow the run selected in the interface, not only the latest one.
+        info["selected_run"] = (
+            None
+            if selected is None
+            else describe(selected) | {"is_latest": selected["id"] == result["id"]}
         )
         return jsonify(info)
 
@@ -198,7 +213,7 @@ def create_app(case_path):
         if result is None:
             return [], {}, None
         kind = request.args.get("type", "")
-        if kind and kind not in RULES:
+        if kind and kind not in EVENT_TYPES:
             raise ValueError("Unknown relationship type.")
         query = request.args.get("q", "").strip().casefold()
         records = {r["id"]: r for r in case.records()}
@@ -226,10 +241,14 @@ def create_app(case_path):
     def events():
         items, records, result = filtered_events()
         summaries = [
-            {k: v for k, v in e.items() if k not in ("support", "context")}
+            {k: v for k, v in e.items() if k not in ("support", "context", "pairs")}
             | {
                 "context_count": len(e["context"]),
                 "support_count": len(e["support"]),
+                "pair_count": len(e.get("pairs", [])),
+                "bulk_mail_indicators": any(
+                    c["code"] == "bulk_mail_indicators" for c in e["context"]
+                ),
                 "subjects": [records[i]["subject"] for i in e["email_ids"][:3]],
             }
             for e in items
@@ -267,6 +286,15 @@ def create_app(case_path):
     @app.get("/api/graph")
     def graph():
         events, records, result = filtered_events()
+        hidden_coordination = 0
+        if request.args.get("include_coordination") not in (None, "", "0", "1"):
+            raise ValueError("Invalid graph coordination setting.")
+        if (
+            request.args.get("include_coordination") != "1"
+            and request.args.get("type") != "possible_coordination"
+        ):
+            hidden_coordination = sum(e["type"] == "possible_coordination" for e in events)
+            events = [e for e in events if e["type"] != "possible_coordination"]
         nodes, links, chosen = {}, [], 0
         for event in events:
             new_ids = set(event["email_ids"]) - nodes.keys()
@@ -288,7 +316,9 @@ def create_app(case_path):
                     "date": record["date_utc"],
                 }
                 source, target = evidence_id, event["id"]
-                if event["direction"] and event["direction"]["child"] == evidence_id:
+                if event["direction"] and evidence_id in event["direction"].get(
+                    "child_copies", [event["direction"]["child"]]
+                ):
                     source, target = target, source
                 links.append(
                     {"source": source, "target": target, "directed": event["type"] == "reply"}
@@ -298,6 +328,7 @@ def create_app(case_path):
             links=links,
             shown_events=chosen,
             total_events=len(events),
+            hidden_coordination=hidden_coordination,
             truncated=chosen != len(events),
             run_id=result["id"] if result else None,
         )

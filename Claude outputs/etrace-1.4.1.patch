@@ -1,0 +1,361 @@
+diff --git a/README.md b/README.md
+index 79477fa..14e7568 100644
+--- a/README.md
++++ b/README.md
+@@ -88,8 +88,10 @@ application, not a hosted service with user accounts.
+    evidence metadata, every analysis run, provenance and the audit chain.
+ 
+ The analysis selector reopens older runs. Summary cards describe the latest
+-selected analysis. A visible notice identifies a stale current run after new evidence is
+-added. Select **Apply** after changing filters; **Reset** clears them.
++selected analysis. A visible notice marks the latest run out of date when evidence
++was added after it, or when it was made with an older rule or parser version (or
++one it did not record), and names the reason; `etrace info` reports the same
++`latest_run` status. Older runs are never altered and stay available for review. Select **Apply** after changing filters; **Reset** clears them.
+ 
+ Browser uploads retain filenames as acquisition labels; use CLI ingestion when
+ the original full source path should be recorded. Evidence HTML is never
+@@ -119,11 +121,13 @@ sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+ decoded content digest matches or the only differences are recognised
+ link-protection rewrites. For that comparison the parser records a fingerprint of
+ the full decoded content of every part, including HTML markup, attributes,
+-comments, hidden form fields and attachment bytes, with each URL masked and
++comments, hidden form fields, and attachment bytes, filenames and dispositions,
++with each URL masked and
+ whitespace collapsed, together with the URLs in order. Two files match only when
+ the fingerprints are identical and their URLs decode to the same destinations in
+ the same order. Any other difference, such as a changed account number in the
+-visible text or a hidden HTML field, keeps the files apart, and a reply to their
++visible text, a hidden HTML field or a renamed attachment with the same bytes,
++keeps the files apart, and a reply to their
+ shared Message-ID stays an ambiguous parent. A gateway that changes markup as
+ well as links (for example by adding a warning banner) also leaves its copies
+ ambiguous.
+@@ -222,9 +226,10 @@ Rule version 1.2.0 replaced the share-based common-artifact filter with the
+ organisation-domain and routine-background rules; 1.3.0 made the organisation
+ domain an investigator-confirmed setting and limited link-wrapper recognition to
+ provider domains; 1.4.0 required the full decoded content, markup included, to
+-match before files are grouped as copies. Precision and recall from older labels
++match before files are grouped as copies; 1.4.1 added attachment filenames and
++dispositions to that comparison. Precision and recall from older labels
+ are not a valid benchmark for the current rules. The evaluator reports
+-`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.0 and
++`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.1 and
+ review any external corpus labels against the new rule table. Corpora that use a
+ fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
+ grouping.
+diff --git a/evaluation/generate.py b/evaluation/generate.py
+index 8afc3db..38081ea 100644
+--- a/evaluation/generate.py
++++ b/evaluation/generate.py
+@@ -12,7 +12,7 @@ from itertools import combinations
+ from pathlib import Path
+ 
+ RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
+-RULE_VERSION = "1.4.0"  # Declares the rule definitions used by generated conformance labels.
++RULE_VERSION = "1.4.1"  # Declares the rule definitions used by generated conformance labels.
+ TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
+ 
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index ca1c4b1..40a3914 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "etrace-forensics"
+-version = "1.4.0"
++version = "1.4.1"
+ description = "Email timeline reconstruction and artifact correlation with evidence provenance"
+ requires-python = ">=3.12"
+ dependencies = ["Flask==3.1.3", "waitress==3.0.2", "extract-msg==0.56.1"]
+diff --git a/src/etrace/__init__.py b/src/etrace/__init__.py
+index 43cb3a3..089613d 100644
+--- a/src/etrace/__init__.py
++++ b/src/etrace/__init__.py
+@@ -1,3 +1,3 @@
+ """Email Timeline Reconstruction and Artifact Correlation Engine."""
+ 
+-__version__ = "1.4.0"
++__version__ = "1.4.1"
+diff --git a/src/etrace/case.py b/src/etrace/case.py
+index 4c16942..3708fe2 100644
+--- a/src/etrace/case.py
++++ b/src/etrace/case.py
+@@ -6,7 +6,15 @@ from contextlib import closing, contextmanager
+ from pathlib import Path
+ 
+ from . import __version__
+-from .model import MAX_FILE_BYTES, PARSER_VERSION, canonical, digest, object_digest, utc_now
++from .model import (
++    MAX_FILE_BYTES,
++    PARSER_VERSION,
++    RULE_VERSION,
++    canonical,
++    digest,
++    object_digest,
++    utc_now,
++)
+ from .parser import parse_email
+ 
+ SCHEMA_VERSION = 1
+@@ -253,6 +261,59 @@ class Case:
+             )
+         return result
+ 
++    def run_status(self, result=None):
++        """Explain why a saved run no longer reflects the current evidence, rules or parser."""
++        result = self.run() if result is None else result
++        if result is None:
++            return None
++        with self.connect() as db:
++            evidence_digest = object_digest(
++                [r[0] for r in db.execute("SELECT id FROM evidence ORDER BY id")]
++            )
++        # Runs saved before 1.2 recorded the rule version only on their events.
++        rule_version = result.get("rule_version") or next(
++            (e["rule_version"] for e in result.get("events", []) if e.get("rule_version")), None
++        )
++        parser_versions = result.get("parser_versions")
++        reasons = []
++        if result.get("evidence_digest") != evidence_digest:
++            reasons.append(
++                {"code": "evidence", "detail": "Evidence was added after this analysis."}
++            )
++        if rule_version != RULE_VERSION:
++            reasons.append(
++                {
++                    "code": "rule_version",
++                    "detail": (
++                        f"Analysed with rules {rule_version}"
++                        if rule_version
++                        else "Rule version not recorded"
++                    )
++                    + f"; current rules are {RULE_VERSION}.",
++                }
++            )
++        if parser_versions != [PARSER_VERSION]:
++            recorded = (
++                f"Parsed with parser {', '.join(parser_versions)}"
++                if parser_versions
++                else "Parser version not recorded"
++            )
++            reasons.append(
++                {
++                    "code": "parser_version",
++                    "detail": f"{recorded}; current parser is {PARSER_VERSION}.",
++                }
++            )
++        return {
++            "run_id": result.get("id"),
++            "stale": bool(reasons),
++            "stale_reasons": reasons,
++            "rule_version": rule_version,
++            "parser_versions": parser_versions,
++            "current_rule_version": RULE_VERSION,
++            "current_parser_version": PARSER_VERSION,
++        }
++
+     def run(self, run_id=None):
+         with self.connect() as db:
+             if run_id is None:
+diff --git a/src/etrace/cli.py b/src/etrace/cli.py
+index dfacecf..e867962 100644
+--- a/src/etrace/cli.py
++++ b/src/etrace/cli.py
+@@ -78,7 +78,7 @@ def main(argv=None):
+             serve(args.case, args.port)
+             return 0
+         if args.command == "info":
+-            emit(case.summary())
++            emit({**case.summary(), "latest_run": case.run_status()})
+         elif args.command == "analyze":
+             config = RuleConfig(
+                 window_seconds=args.window_seconds,
+diff --git a/src/etrace/model.py b/src/etrace/model.py
+index df884f5..6f28287 100644
+--- a/src/etrace/model.py
++++ b/src/etrace/model.py
+@@ -5,8 +5,8 @@ import json
+ from dataclasses import asdict, dataclass
+ from datetime import UTC, datetime
+ 
+-PARSER_VERSION = "1.2.0"
+-RULE_VERSION = "1.4.0"
++PARSER_VERSION = "1.3.0"
++RULE_VERSION = "1.4.1"
+ MAX_FILE_BYTES = 25 * 1024 * 1024
+ MAX_PARTS = 1000
+ MAX_TEXT_CHARS = 2_000_000
+diff --git a/src/etrace/parser.py b/src/etrace/parser.py
+index edfe348..6b4d656 100644
+--- a/src/etrace/parser.py
++++ b/src/etrace/parser.py
+@@ -369,8 +369,11 @@ def _parse_email(raw, filename):
+             if count > MAX_PARTS or depth > 30:
+                 raise ValueError("MIME structure limit exceeded; this file was not ingested.")
+             if part.get_content_type() == "message/rfc822":
+-                content_parts.append(("message/rfc822", digest(part.as_bytes())))
+-                fingerprint_parts.append(("message/rfc822", digest(part.as_bytes())))
++                # Filename and disposition are part of what the recipient sees, so a
++                # renamed attachment is a different message, not a copy.
++                labels = (part.get_filename() or "", part.get_content_disposition() or "")
++                content_parts.append(("message/rfc822", digest(part.as_bytes()), *labels))
++                fingerprint_parts.append(("message/rfc822", digest(part.as_bytes()), *labels))
+                 warn(
+                     "embedded_message",
+                     "Attached message retained in source; not attributed to the outer message.",
+@@ -391,11 +394,12 @@ def _parse_email(raw, filename):
+             else:
+                 payload = part.get_payload(decode=True) or b""
+                 content_type = part.get_content_type()
+-                content_parts.append((content_type, digest(payload)))
+                 filename = part.get_filename()
+                 disposition = part.get_content_disposition()
++                labels = (filename or "", disposition or "")
++                content_parts.append((content_type, digest(payload), *labels))
+                 if filename or disposition == "attachment" or not content_type.startswith("text/"):
+-                    fingerprint_parts.append((content_type, digest(payload)))
++                    fingerprint_parts.append((content_type, digest(payload), *labels))
+                     inline_resource = content_type.startswith("image/") and (
+                         disposition == "inline"
+                         or (disposition != "attachment" and bool(part.get("Content-ID")))
+@@ -508,10 +512,10 @@ def _parse_email(raw, filename):
+                 location = f"msg:attachment:{i}"
+                 data = attachment.data
+                 if isinstance(data, bytes):
+-                    content_parts.append((attachment.mimetype or "application/octet-stream", digest(data)))
+-                    fingerprint_parts.append(
+-                        (attachment.mimetype or "application/octet-stream", digest(data))
+-                    )
++                    name = attachment.longFilename or attachment.shortFilename or ""
++                    entry = (attachment.mimetype or "application/octet-stream", digest(data), name, "")
++                    content_parts.append(entry)
++                    fingerprint_parts.append(entry)
+                     artifact(
+                         "attachment_sha256",
+                         digest(data),
+diff --git a/src/etrace/static/app.js b/src/etrace/static/app.js
+index d5087fa..bbf1d24 100644
+--- a/src/etrace/static/app.js
++++ b/src/etrace/static/app.js
+@@ -102,14 +102,18 @@ async function refresh() {
+   $("stat-events").textContent = run
+     ? run.statistics.events.toLocaleString()
+     : "0";
++  const reasons = run?.stale_reasons || [];
++  const codes = new Set(reasons.map((r) => r.code));
+   $("stat-run").textContent = run
+     ? run.stale
+-      ? "New evidence: rerun analysis"
++      ? codes.size === 1 && codes.has("evidence")
++        ? "New evidence: rerun analysis"
++        : "Out of date: rerun analysis"
+       : `${summary.runs} saved analysis ${summary.runs === 1 ? "run" : "runs"}`
+     : "Analysis not run";
+   if (run?.stale)
+     notify(
+-      "New evidence has been acquired since the latest analysis. Run analysis to include it.",
++      `The latest analysis is out of date. ${reasons.map((r) => r.detail).join(" ")} Run analysis again; earlier runs stay available for review.`,
+     );
+   $("run-select").replaceChildren(
+     el("option", { value: "" }, "Latest run"),
+diff --git a/src/etrace/web.py b/src/etrace/web.py
+index 0e0c2bd..66e05c3 100644
+--- a/src/etrace/web.py
++++ b/src/etrace/web.py
+@@ -14,7 +14,7 @@ from werkzeug.exceptions import HTTPException
+ from . import __version__
+ from .case import Case
+ from .correlate import analyze, suggest_organisation_domains
+-from .model import EVENT_TYPES, MAX_FILE_BYTES, RuleConfig, object_digest
++from .model import EVENT_TYPES, MAX_FILE_BYTES, RuleConfig
+ 
+ 
+ def brief(record):
+@@ -114,8 +114,7 @@ def create_app(case_path):
+                 "statistics": result["statistics"],
+                 "config": result["config"],
+                 "counts": dict(Counter(e["type"] for e in result["events"])),
+-                "stale": result["evidence_digest"]
+-                != object_digest(sorted(r["id"] for r in records)),
++                **case.run_status(result),
+             }
+         )
+         return jsonify(info)
+diff --git a/tests/test_case_web.py b/tests/test_case_web.py
+index edef40d..f7fe984 100644
+--- a/tests/test_case_web.py
++++ b/tests/test_case_web.py
+@@ -117,6 +117,50 @@ class CaseAndWebTests(unittest.TestCase):
+             self.assertEqual(client.get("/api/events?type=unknown").status_code, 400)
+             self.assertTrue(case.verify()["ok"])
+ 
++    def test_latest_run_is_out_of_date_after_rule_parser_or_evidence_changes(self):
++        import contextlib
++        import io
++
++        from etrace.cli import main
++        from etrace.model import PARSER_VERSION, RULE_VERSION
++
++        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
++            path = Path(directory) / "case.db"
++            case = Case.create(path, "Run status")
++            case.ingest_bytes(raw_email("one"), "one.eml")
++            case.ingest_bytes(raw_email("two"), "two.eml")
++            current = analyze(case.records())
++            client = create_app(path).test_client()
++            # A run saved by rules 1.0.0: version only on its events, no parser versions.
++            old = json.loads(json.dumps(current))
++            old.pop("rule_version")
++            old.pop("parser_versions")
++            for event in old["events"]:
++                event["rule_version"] = "1.0.0"
++            old["id"] = object_digest({k: v for k, v in old.items() if k != "id"})
++            case.save_run(old)
++            run = client.get("/api/case").get_json()["latest_run"]
++            self.assertTrue(run["stale"])
++            self.assertEqual(
++                [r["code"] for r in run["stale_reasons"]], ["rule_version", "parser_version"]
++            )
++            self.assertIn("rules 1.0.0", run["stale_reasons"][0]["detail"])
++            self.assertIn("not recorded", run["stale_reasons"][1]["detail"])
++            # A run from the current code is current.
++            case.save_run(current)
++            run = client.get("/api/case").get_json()["latest_run"]
++            self.assertEqual((run["stale"], run["stale_reasons"]), (False, []))
++            self.assertEqual(run["current_rule_version"], RULE_VERSION)
++            self.assertEqual(run["parser_versions"], [PARSER_VERSION])
++            # New evidence makes it out of date again; the CLI reports the same status.
++            case.ingest_bytes(raw_email("three"), "three.eml")
++            output = io.StringIO()
++            with contextlib.redirect_stdout(output):
++                self.assertEqual(main(["info", str(path)]), 0)
++            info = json.loads(output.getvalue())
++            self.assertEqual([r["code"] for r in info["latest_run"]["stale_reasons"]], ["evidence"])
++            self.assertTrue(case.verify()["ok"])
++
+     def test_cli_analysis_accepts_background_and_domain_options(self):
+         import contextlib
+         import io
+diff --git a/tests/test_correlation.py b/tests/test_correlation.py
+index aae153b..45fcc5e 100644
+--- a/tests/test_correlation.py
++++ b/tests/test_correlation.py
+@@ -172,6 +172,15 @@ class CorrelationTests(unittest.TestCase):
+             )
+         )
+ 
++    def test_renamed_attachment_with_identical_bytes_stays_ambiguous(self):
++        invoice = ("invoice.pdf", b"%PDF-1.4 identical bytes", "attachment")
++        renamed = ("malware.exe", b"%PDF-1.4 identical bytes", "attachment")
++        self.assert_ambiguous(self._parent_case({"attachments": [invoice]}, {"attachments": [renamed]}))
++        # The same attachment under the same name is still one message seen twice.
++        same = self._parent_case({"attachments": [invoice]}, {"attachments": [invoice]})
++        self.assertEqual(same["statistics"]["copy_groups"], 1)
++        self.assertTrue(any(e["type"] == "reply" for e in same["events"]))
++
+     def test_safe_links_html_copy_with_rewritten_href_is_grouped(self):
+         original = "https://portal.vendor.example/pay?invoice=10391&amp;ref=7"
+         wrapped = (

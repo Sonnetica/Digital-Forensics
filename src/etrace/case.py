@@ -6,7 +6,15 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from . import __version__
-from .model import MAX_FILE_BYTES, canonical, digest, object_digest, utc_now
+from .model import (
+    MAX_FILE_BYTES,
+    PARSER_VERSION,
+    RULE_VERSION,
+    canonical,
+    digest,
+    object_digest,
+    utc_now,
+)
 from .parser import parse_email
 
 SCHEMA_VERSION = 1
@@ -40,6 +48,7 @@ CREATE TABLE audit(
 class Case:
     def __init__(self, path):
         self.path = Path(path).expanduser().resolve()
+        self._current_records = {}
         if not self.path.is_file():
             raise ValueError(f"Case does not exist: {self.path}. Create it with etrace init.")
         with self.connect() as db:
@@ -163,16 +172,35 @@ class Case:
     def records(self):
         with self.connect() as db:
             records = [
-                json.loads(row[0]) for row in db.execute("SELECT record FROM evidence ORDER BY id")
+                self._current_record(db, row)
+                for row in db.execute("SELECT id,record,format FROM evidence ORDER BY id")
             ]
         return records
 
+    def _current_record(self, db, row):
+        evidence_id = row["id"]
+        if evidence_id in self._current_records:
+            return self._current_records[evidence_id]
+        stored = json.loads(row["record"])
+        if stored.get("parser_version") == PARSER_VERSION:
+            record = stored
+        else:
+            raw = db.execute("SELECT raw FROM evidence WHERE id=?", (evidence_id,)).fetchone()[0]
+            if digest(raw) != evidence_id:
+                raise ValueError(f"Source hash mismatch: {evidence_id}")
+            record = parse_email(bytes(raw), f"{evidence_id}.{row['format']}")
+            record["stored_parser_version"] = stored.get("parser_version")
+        self._current_records[evidence_id] = record
+        return record
+
     def evidence(self, evidence_id):
         with self.connect() as db:
-            row = db.execute("SELECT record FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+            row = db.execute(
+                "SELECT id,record,format FROM evidence WHERE id=?", (evidence_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(evidence_id)
-            record = json.loads(row[0])
+            record = dict(self._current_record(db, row))
             record["sources"] = [
                 dict(r)
                 for r in db.execute(
@@ -232,6 +260,75 @@ class Case:
                 db, "analyze", {"run_id": result["id"], "result_hash": digest(encoded.encode())}
             )
         return result
+
+    def run_status(self, result=None, records=None):
+        """Explain why a saved run no longer reflects the current evidence, rules or parser."""
+        result = self.run() if result is None else result
+        if result is None:
+            return None
+        records = self.records() if records is None else records
+        with self.connect() as db:
+            evidence_digest = object_digest(
+                [r[0] for r in db.execute("SELECT id FROM evidence ORDER BY id")]
+            )
+        # An empty case is analysed with no parser at all, so no version is expected.
+        expected_parsers = sorted({str(r.get("parser_version")) for r in records})
+        # Runs saved before 1.2 recorded the rule version only on their events.
+        rule_version = result.get("rule_version") or next(
+            (e["rule_version"] for e in result.get("events", []) if e.get("rule_version")), None
+        )
+        parser_versions = result.get("parser_versions")
+        reasons = []
+        if result.get("evidence_digest") != evidence_digest:
+            reasons.append(
+                {"code": "evidence", "detail": "Evidence was added after this analysis."}
+            )
+        if rule_version != RULE_VERSION:
+            reasons.append(
+                {
+                    "code": "rule_version",
+                    "detail": (
+                        f"Analysed with rules {rule_version}"
+                        if rule_version
+                        else "Rule version not recorded"
+                    )
+                    + f"; current rules are {RULE_VERSION}.",
+                }
+            )
+        if parser_versions != expected_parsers:
+            recorded = (
+                f"Parsed with parser {', '.join(parser_versions)}"
+                if parser_versions
+                else "Parser version not recorded"
+            )
+            reasons.append(
+                {
+                    "code": "parser_version",
+                    "detail": f"{recorded}; current parser is {PARSER_VERSION}.",
+                }
+            )
+        # Same evidence and versions, but the parsed records differ from what was analysed
+        # (for example a parsing library update, or records changed outside E-TRACE).
+        if (
+            not reasons
+            and result.get("record_digest")
+            and result["record_digest"] != object_digest(records)
+        ):
+            reasons.append(
+                {
+                    "code": "records",
+                    "detail": "The parsed evidence no longer matches what this analysis used.",
+                }
+            )
+        return {
+            "run_id": result.get("id"),
+            "stale": bool(reasons),
+            "stale_reasons": reasons,
+            "rule_version": rule_version,
+            "parser_versions": parser_versions,
+            "current_rule_version": RULE_VERSION,
+            "current_parser_version": PARSER_VERSION,
+        }
 
     def run(self, run_id=None):
         with self.connect() as db:
@@ -380,8 +477,17 @@ class Case:
         with self.connect() as db:
             db.execute("BEGIN")
             evidence = []
-            for row in db.execute("SELECT id,record FROM evidence ORDER BY id"):
+            for row in db.execute("SELECT id,record,format FROM evidence ORDER BY id").fetchall():
                 record = json.loads(row["record"])
+                if record.get("parser_version") != PARSER_VERSION:
+                    # Analyses re-parse the preserved bytes with the current parser.
+                    # Export that derived record too, so run support pointers can be
+                    # traced; the stored acquisition record stays unchanged.
+                    try:
+                        record["analysis_record"] = self._current_record(db, row)
+                    except ValueError as exc:
+                        # Keep exporting a damaged case; the integrity section reports it.
+                        record["analysis_record_error"] = str(exc)
                 record["sources"] = [
                     dict(source)
                     for source in db.execute(
@@ -393,6 +499,7 @@ class Case:
             return {
                 "schema_version": SCHEMA_VERSION,
                 "application_version": __version__,
+                "parser_version": PARSER_VERSION,
                 "case": self._summary(db),
                 "evidence": evidence,
                 "runs": [

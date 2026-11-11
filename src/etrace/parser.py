@@ -1,5 +1,6 @@
 """Read-only EML and MSG extraction with explicit source locations."""
 
+import html as html_entities
 import ipaddress
 import platform
 import re
@@ -9,7 +10,15 @@ from email.utils import getaddresses
 from html.parser import HTMLParser
 from pathlib import Path
 
-from .model import MAX_ARTIFACTS, MAX_FILE_BYTES, MAX_PARTS, MAX_TEXT_CHARS, PARSER_VERSION, digest
+from .model import (
+    MAX_ARTIFACTS,
+    MAX_FILE_BYTES,
+    MAX_PARTS,
+    MAX_TEXT_CHARS,
+    PARSER_VERSION,
+    digest,
+    object_digest,
+)
 from .normalize import (
     address_domain,
     message_ids,
@@ -127,7 +136,13 @@ def _parse_email(raw, filename):
         "timestamps": [],
         "body_preview": "",
         "parts": [],
+        "content_digest": None,
+        "copy_fingerprint": None,
     }
+    # Full decoded content with every URL masked, plus the URLs in order. Copy
+    # grouping may only explain differences in those URLs (recognised link
+    # rewriting); any other change, including hidden HTML markup, keeps files apart.
+    fingerprint_parts, fingerprint_urls = [], []
 
     def warn(code, message, location):
         record["warnings"].append({"code": code, "message": message, "location": location})
@@ -303,6 +318,13 @@ def _parse_email(raw, filename):
         total_text_chars += len(text)
         if total_text_chars > MAX_TEXT_CHARS:
             raise ValueError("Decoded text limit exceeded; this file was not ingested.")
+        fingerprint_parts.append(
+            (content_type, digest(" ".join(URL_PATTERN.sub("\x00", text).split()).encode("utf-8")))
+        )
+        fingerprint_urls.extend(
+            html_entities.unescape(match[0]) if content_type == "text/html" else match[0]
+            for match in URL_PATTERN.finditer(text)
+        )
         record["parts"].append(
             {"location": location, "content_type": content_type, "characters": len(text)}
         )
@@ -339,6 +361,7 @@ def _parse_email(raw, filename):
             raise ValueError("No email headers found.")
         extract_headers(message, _raw_headers(raw))
         count = 0
+        content_parts = []
 
         def visit(part, location, depth=0):
             nonlocal count
@@ -346,6 +369,11 @@ def _parse_email(raw, filename):
             if count > MAX_PARTS or depth > 30:
                 raise ValueError("MIME structure limit exceeded; this file was not ingested.")
             if part.get_content_type() == "message/rfc822":
+                # Filename and disposition are part of what the recipient sees, so a
+                # renamed attachment is a different message, not a copy.
+                labels = (part.get_filename() or "", part.get_content_disposition() or "")
+                content_parts.append(("message/rfc822", digest(part.as_bytes()), *labels))
+                fingerprint_parts.append(("message/rfc822", digest(part.as_bytes()), *labels))
                 warn(
                     "embedded_message",
                     "Attached message retained in source; not attributed to the outer message.",
@@ -368,9 +396,16 @@ def _parse_email(raw, filename):
                 content_type = part.get_content_type()
                 filename = part.get_filename()
                 disposition = part.get_content_disposition()
+                labels = (filename or "", disposition or "")
+                content_parts.append((content_type, digest(payload), *labels))
                 if filename or disposition == "attachment" or not content_type.startswith("text/"):
+                    fingerprint_parts.append((content_type, digest(payload), *labels))
+                    inline_resource = content_type.startswith("image/") and (
+                        disposition == "inline"
+                        or (disposition != "attachment" and bool(part.get("Content-ID")))
+                    )
                     artifact(
-                        "attachment_sha256",
+                        "inline_resource_sha256" if inline_resource else "attachment_sha256",
                         digest(payload),
                         digest(payload),
                         location,
@@ -378,6 +413,7 @@ def _parse_email(raw, filename):
                         content_type=content_type,
                         size=len(payload),
                         disposition=disposition or "unspecified",
+                        content_id=str(part.get("Content-ID", "")),
                         hash_basis="MIME transfer-decoded bytes",
                     )
                     record["parts"].append(
@@ -401,6 +437,7 @@ def _parse_email(raw, filename):
                         )
                     extract_text(text, content_type, location)
                 else:
+                    fingerprint_parts.append((content_type, digest(payload)))
                     warn(
                         "unsupported_text_part",
                         f"{content_type} retained but not searched for URLs.",
@@ -410,6 +447,7 @@ def _parse_email(raw, filename):
                 warn(type(defect).__name__, str(defect) or "Malformed MIME part.", location)
 
         visit(message, "mime:1")
+        record["content_digest"] = object_digest(content_parts)
     else:
         import extract_msg
 
@@ -446,7 +484,10 @@ def _parse_email(raw, filename):
             body = message.getStringStream("__substg1.0_1000")
             html = message.getStream("__substg1.0_10130102")
             if body:
+                content_parts = [("text/plain", digest(body.encode("utf-8")))]
                 extract_text(body, "text/plain", "msg:stream:__substg1.0_1000")
+            else:
+                content_parts = []
             if html:
                 try:
                     html = html.decode("utf-8", "strict")
@@ -458,6 +499,7 @@ def _parse_email(raw, filename):
                         "msg:stream:__substg1.0_10130102",
                     )
                 extract_text(html, "text/html", "msg:stream:__substg1.0_10130102")
+                content_parts.append(("text/html", digest(html.encode("utf-8"))))
             if not body and not html:
                 warn(
                     "unsupported_msg_body",
@@ -470,6 +512,10 @@ def _parse_email(raw, filename):
                 location = f"msg:attachment:{i}"
                 data = attachment.data
                 if isinstance(data, bytes):
+                    name = attachment.longFilename or attachment.shortFilename or ""
+                    entry = (attachment.mimetype or "application/octet-stream", digest(data), name, "")
+                    content_parts.append(entry)
+                    fingerprint_parts.append(entry)
                     artifact(
                         "attachment_sha256",
                         digest(data),
@@ -486,6 +532,11 @@ def _parse_email(raw, filename):
                         "Embedded Outlook item retained in source; not flattened.",
                         location,
                     )
+            record["content_digest"] = object_digest(content_parts)
+    record["copy_fingerprint"] = {
+        "structure": object_digest(fingerprint_parts),
+        "urls": fingerprint_urls,
+    }
     record["body_preview"] = record["body_preview"][:12000]
     record["artifacts"].sort(key=lambda a: (a["kind"], a["value"], a["location"]))
     return record

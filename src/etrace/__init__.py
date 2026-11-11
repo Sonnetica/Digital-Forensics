@@ -1,3 +1,3 @@
 """Email Timeline Reconstruction and Artifact Correlation Engine."""
 
-__version__ = "1.0.0"
+__version__ = "1.4.3"
