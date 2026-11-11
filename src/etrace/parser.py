@@ -1,5 +1,6 @@
 """Read-only EML and MSG extraction with explicit source locations."""
 
+import codecs
 import html as html_entities
 import ipaddress
 import platform
@@ -28,6 +29,81 @@ from .normalize import (
 )
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\x00-\x20\x7f\"']+", re.I)
+META_CHARSET = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.I)
+# Windows code page identifiers (PidTagInternetCodepage) whose Python codec is not cpNNN.
+CODEPAGE_CODECS = {
+    65001: "utf-8",
+    65000: "utf-7",
+    1200: "utf-16-le",
+    1201: "utf-16-be",
+    20127: "ascii",
+    20866: "koi8-r",
+    21866: "koi8-u",
+    50220: "iso2022-jp",
+    50221: "iso2022-jp",
+    50222: "iso2022-jp",
+    51932: "euc-jp",
+    51949: "euc-kr",
+    52936: "hz",
+    54936: "gb18030",
+    936: "gbk",
+    28603: "iso8859-13",
+    28605: "iso8859-15",
+    **{28590 + n: f"iso8859-{n}" for n in range(1, 10)},
+}
+MAX_RTF_BYTES = 5 * 1024 * 1024  # De-encapsulation is slow on very large RTF bodies.
+
+
+def codepage_codec(codepage):
+    """Python codec for a Windows code page identifier, or None when unknown."""
+    if not isinstance(codepage, int) or codepage <= 0:
+        return None
+    name = CODEPAGE_CODECS.get(codepage, f"cp{codepage}")
+    try:
+        return codecs.lookup(name).name
+    except LookupError:
+        return None
+
+
+def decode_msg_html(data, codepage):
+    """Decode the binary PidTagHtml stream.
+
+    MS-OXPROPS stores the HTML body as binary; its character set is the message's
+    PidTagInternetCodepage. Try that, then a <meta charset>, then UTF-8. Return the
+    text, the codec used, what it was based on, and an optional warning message.
+    """
+    candidates = []
+    declared = codepage_codec(codepage)
+    if declared:
+        candidates.append((declared, f"PidTagInternetCodepage {codepage}"))
+    meta = META_CHARSET.search(data[:4096])
+    if meta:
+        try:
+            candidates.append(
+                (codecs.lookup(meta.group(1).decode("ascii")).name, "HTML meta charset")
+            )
+        except (LookupError, UnicodeError):
+            pass
+    candidates.append(("utf-8", "UTF-8 default"))
+    for codec, basis in candidates:
+        try:
+            text = data.decode(codec, "strict")
+        except (UnicodeError, LookupError):
+            continue
+        warning = None
+        if declared and codec != declared:
+            warning = (
+                f"HTML bytes are not valid {declared} (PidTagInternetCodepage {codepage}); "
+                f"decoded as {codec} from the {basis}."
+            )
+        return text, codec, basis, warning
+    return (
+        data.decode("cp1252", "replace"),
+        "cp1252",
+        "replacement fallback",
+        "MSG HTML matched no declared or default character set; decoded as Windows-1252, "
+        "with any undecodable bytes replaced. The original bytes remain in the source.",
+    )
 
 
 class LinkParser(HTMLParser):
@@ -98,10 +174,14 @@ def parse_email(raw, filename):
         return _parse_email(raw, filename)
     except (RecursionError, LookupError, UnicodeError) as exc:
         raise ValueError(f"Email parsing failed: {type(exc).__name__}: {exc}") from exc
+    except ValueError:
+        raise
     except Exception as exc:
         if Path(filename).suffix.lower() == ".msg":
-            from extract_msg.exceptions import ExMsgBaseException
-
+            try:
+                from extract_msg.exceptions import ExMsgBaseException
+            except ImportError:
+                raise
             if isinstance(exc, ExMsgBaseException):
                 raise ValueError(f"Outlook parsing failed: {exc}") from exc
         raise
@@ -449,7 +529,14 @@ def _parse_email(raw, filename):
         visit(message, "mime:1")
         record["content_digest"] = object_digest(content_parts)
     else:
-        import extract_msg
+        try:
+            import extract_msg
+        except ImportError as exc:
+            raise ValueError(
+                "Reading .msg files needs the extract-msg package; install E-TRACE with "
+                "'pip install -e .' (or 'pip install extract-msg==0.56.1'). "
+                "This file was not ingested."
+            ) from exc
 
         record["parser_runtime"]["extract_msg"] = extract_msg.__version__
 
@@ -488,19 +575,78 @@ def _parse_email(raw, filename):
                 extract_text(body, "text/plain", "msg:stream:__substg1.0_1000")
             else:
                 content_parts = []
+            html_location = "msg:stream:__substg1.0_10130102"
             if html:
+                codepage = message.getPropertyVal("3FDE0003")
+                text, codec, basis, problem = decode_msg_html(html, codepage)
+                if problem:
+                    warn("charset_fallback", problem, html_location)
+                extract_text(text, "text/html", html_location)
+                record["parts"][-1].update(charset=codec, charset_basis=basis)
+                content_parts.append(("text/html", digest(html)))
+            else:
+                # Outlook often keeps the HTML body only inside the compressed RTF body
+                # (PidTagRtfCompressed). Reconstruct it so link targets are searched; the
+                # result is derived content and is labelled as such.
+                rtf_location = "msg:stream:__substg1.0_10090102"
                 try:
-                    html = html.decode("utf-8", "strict")
-                except UnicodeError:
-                    html = html.decode("utf-8", "replace")
+                    rtf = message.rtfBody
+                except Exception as exc:  # noqa: BLE001 - library raises varied errors
+                    rtf = None
+                    warn("msg_rtf_unreadable", f"Compressed RTF body could not be read: {exc}", rtf_location)
+                encapsulated = None
+                if rtf and len(rtf) > MAX_RTF_BYTES:
                     warn(
-                        "charset_fallback",
-                        "MSG HTML decoded with UTF-8 replacement; original bytes remain in the source.",
-                        "msg:stream:__substg1.0_10130102",
+                        "msg_rtf_not_expanded",
+                        "RTF body exceeds 5 MiB and was not de-encapsulated; it remains in the source.",
+                        rtf_location,
                     )
-                extract_text(html, "text/html", "msg:stream:__substg1.0_10130102")
-                content_parts.append(("text/html", digest(html.encode("utf-8"))))
-            if not body and not html:
+                elif rtf:
+                    try:
+                        encapsulated = message.deencapsulatedRtf
+                    except Exception as exc:  # noqa: BLE001 - RTFDE raises parser errors
+                        warn(
+                            "msg_rtf_not_expanded",
+                            f"RTF body could not be de-encapsulated ({type(exc).__name__}); "
+                            "it remains in the source and was not searched.",
+                            rtf_location,
+                        )
+                derived = None
+                if encapsulated is not None and encapsulated.content_type == "html":
+                    derived = ("text/html", encapsulated.html, "html")
+                elif encapsulated is not None and not body and encapsulated.text:
+                    derived = ("text/plain", encapsulated.text, "text")
+                elif rtf and encapsulated is None and not body:
+                    warn(
+                        "msg_rtf_not_expanded",
+                        "Only a plain RTF body is stored; it remains in the source and was not searched.",
+                        rtf_location,
+                    )
+                if derived:
+                    content_type, value, kind = derived
+                    data = value if isinstance(value, bytes) else value.encode("utf-8")
+                    try:
+                        text = data.decode("utf-8", "strict")
+                    except UnicodeError:
+                        text = data.decode("utf-8", "replace")
+                        warn(
+                            "charset_fallback",
+                            "RTF-derived body decoded with UTF-8 replacement characters.",
+                            rtf_location,
+                        )
+                    location = f"{rtf_location}:encapsulated-{kind}"
+                    extract_text(text, content_type, location)
+                    record["parts"][-1].update(derived_from="PidTagRtfCompressed")
+                    content_parts.append((f"{content_type};rtf-derived", digest(data)))
+                    warn(
+                        "msg_body_from_rtf",
+                        f"The {kind.upper()} body was reconstructed from the compressed RTF body; "
+                        "it is derived content and the original bytes remain in the source.",
+                        location,
+                    )
+            if not body and not html and not any(
+                part.get("derived_from") for part in record["parts"]
+            ):
                 warn(
                     "unsupported_msg_body",
                     "No stored plain-text or HTML body; RTF and encrypted content remain in the source and are not expanded.",

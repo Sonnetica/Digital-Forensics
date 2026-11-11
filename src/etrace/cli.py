@@ -66,11 +66,27 @@ def main(argv=None):
         command.add_argument("case", type=Path)
         if name == "export":
             command.add_argument("--output", type=Path, required=True)
+            command.add_argument(
+                "--bundle",
+                action="store_true",
+                help="Write a zip with the original sources, hashes, settings and audit record",
+            )
+    restore = commands.add_parser(
+        "import-bundle", help="Rebuild a case from a bundle and reproduce its analyses"
+    )
+    restore.add_argument("bundle", type=Path)
+    restore.add_argument("--case", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
             emit(Case.create(args.case, args.name).summary())
             return 0
+        if args.command == "import-bundle":
+            from .bundle import import_bundle
+
+            report = import_bundle(args.bundle, args.case)
+            emit(report)
+            return 0 if report["ok"] else 1
         case = Case(args.case)
         if args.command == "serve":
             from .web import serve
@@ -106,6 +122,10 @@ def main(argv=None):
             result = case.verify()
             emit(result)
             return 0 if result["ok"] else 1
+        elif args.command == "export" and args.bundle:
+            from .bundle import export_bundle
+
+            emit({"output": str(args.output.resolve()), **export_bundle(case, args.output)})
         elif args.command == "export":
             with args.output.open("x", encoding="utf-8") as stream:
                 json.dump(case.export(), stream, indent=2, ensure_ascii=True)

@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
-PARSER_VERSION = "1.3.0"
+PARSER_VERSION = "1.4.0"
 RULE_VERSION = "1.4.1"
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_PARTS = 1000

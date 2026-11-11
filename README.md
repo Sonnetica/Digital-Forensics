@@ -32,6 +32,7 @@ etrace info E:\cases\incident.db
 etrace analyze E:\cases\incident.db --window-seconds 3600
 etrace verify E:\cases\incident.db
 etrace export E:\cases\incident.db --output E:\cases\incident.json
+etrace export E:\cases\incident.db --bundle --output E:\cases\incident-bundle.zip
 ```
 
 To try the bundled sample emails with a newly created case, ingest
@@ -44,6 +45,41 @@ different files with the same Message-ID remain separate evidence items.
 Files larger than 25 MiB, empty files, unsupported formats, and exceeded parsing
 limits are rejected. Per-file errors do not discard successful acquisitions.
 An ingest command returns a nonzero exit status when any file fails.
+
+## Case handoff bundle
+
+The case database already holds the original bytes, parsed records, every run and
+its settings, and the audit trail. A bundle packages the same material as plain
+files so another investigator can check it with standard tools and reproduce the
+analysis without access to the original database:
+
+```powershell
+etrace export E:\cases\incident.db --bundle --output E:\handoff\incident.zip
+etrace import-bundle E:\handoff\incident.zip --case E:\cases\incident-rebuilt.db
+```
+
+The zip contains `sources/` (each original EML/MSG named by its SHA-256),
+`case-export.json` (the JSON export, including the audit trail and integrity
+check), `manifest.json` (hashes, sizes, every acquisition name and time, runs and
+their findings digests), `SHA256SUMS` and a short `README.txt`. On Linux or macOS
+`sha256sum -c SHA256SUMS` checks every file; on Windows compare
+`Get-FileHash -Algorithm SHA256` output with `SHA256SUMS`. **Export bundle** in the
+interface downloads the same zip.
+
+`import-bundle` refuses a bundle with any altered, missing, unlisted or oddly
+named file, before creating the case. It then recomputes the original audit hash
+chain, ingests every acquisition under its original name, records an
+`import_bundle` entry (bundle SHA-256 and original audit head) in the new case's
+audit trail, and re-runs each saved analysis with its saved settings on the
+evidence that run used. The report states per run whether the findings (copy
+groups, relationships, diagnostics and statistics) match. Run identifiers also
+match when the Python and extract-msg versions are the same; parsed records note
+those versions, so another machine can give a different identifier with identical
+findings. Runs made with other rule or parser versions are reported as not
+comparable. The latest run is saved in the rebuilt case. The command exits with
+status 1 when the original audit chain or a comparable run does not reproduce.
+The rebuilt case has its own acquisition times and audit trail; the original
+trail stays in `case-export.json`.
 
 ## Investigator interface
 
@@ -425,11 +461,12 @@ the automated evaluations above.
 | --- | --- |
 | `src/etrace/parser.py`, `normalize.py` | EML/MSG extraction and conservative normalization |
 | `src/etrace/case.py` | SQLite evidence, acquisition history, saved runs and verification |
+| `src/etrace/bundle.py` | Portable handoff bundle export, verification, rebuild and reproduction |
 | `src/etrace/correlate.py`, `model.py` | Indexed deterministic rules, parameters and provenance |
-| `src/etrace/cli.py` | Case acquisition, analysis, export and server commands |
+| `src/etrace/cli.py` | Case acquisition, analysis, export, bundle import and server commands |
 | `src/etrace/web.py`, `templates/`, `static/` | Local investigator API and browser interface |
 | `evaluation/` | Controlled/challenge generator, scoped evaluator, public-corpus preparation, mixing and external threading assessment |
-| `tests/` | Regression tests for parsing, copy grouping, rules, filters, evaluation scoring, case export and the web API |
+| `tests/` | Regression tests for parsing (including real Outlook MSG fixtures in `tests/fixtures/msg/`, BSD-licensed from msg_parser), copy grouping, rules, filters, evaluation scoring, case export, bundles and the web API |
 
 Run the regression tests from the repository root with
 `python -m unittest discover -s tests` and lint with `ruff check src tests evaluation`.
@@ -477,9 +514,16 @@ are not flattened into the outer message. URL extraction covers text bodies,
 HTML links and resource attributes; it does not inspect attachment contents,
 follow redirects, fetch remote resources or execute email HTML.
 
-Only stored plain-text and HTML bodies are extracted from MSG files. RTF-only
-and encrypted bodies remain in the source and produce a limitation warning.
-The extractor does not synthesize HTML or decompress RTF. Unsupported text MIME
+MSG files are read with extract-msg (installed with E-TRACE). The HTML body
+property is binary (MS-OXPROPS `PidTagHtml`); it is decoded with the message's
+`PidTagInternetCodepage`, then an HTML `<meta charset>`, then UTF-8, and finally
+Windows-1252 with replacement and a `charset_fallback` warning. The codec used and
+its basis are recorded with the part. When no HTML property is stored, Outlook
+often keeps the HTML inside the compressed RTF body; E-TRACE then reconstructs it
+(RTF de-encapsulation) so link targets are searched, labels the part as derived
+from `PidTagRtfCompressed` and adds a `msg_body_from_rtf` observation. Plain RTF
+without encapsulated HTML or text, RTF bodies over 5 MiB, malformed RTF and
+encrypted bodies remain in the source with a limitation warning. Unsupported text MIME
 types, nested email attachments, malformed encodings and timestamp issues are
 visible in the evidence record. Plain-text URL punctuation is preserved because
 it may be part of a valid path; this conservative choice can miss a reuse match

@@ -1,0 +1,1091 @@
+diff --git a/.gitignore b/.gitignore
+index 01d4c8d..4951532 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -19,6 +19,7 @@ htmlcov/
+ *.eml
+ !/demo email/*.eml
+ *.msg
++!/tests/fixtures/msg/*.msg
+ *.mbox
+ *.pst
+ *.ost
+diff --git a/README.md b/README.md
+index 77de21d..0addade 100644
+--- a/README.md
++++ b/README.md
+@@ -32,6 +32,7 @@ etrace info E:\cases\incident.db
+ etrace analyze E:\cases\incident.db --window-seconds 3600
+ etrace verify E:\cases\incident.db
+ etrace export E:\cases\incident.db --output E:\cases\incident.json
++etrace export E:\cases\incident.db --bundle --output E:\cases\incident-bundle.zip
+ ```
+ 
+ To try the bundled sample emails with a newly created case, ingest
+@@ -45,6 +46,41 @@ Files larger than 25 MiB, empty files, unsupported formats, and exceeded parsing
+ limits are rejected. Per-file errors do not discard successful acquisitions.
+ An ingest command returns a nonzero exit status when any file fails.
+ 
++## Case handoff bundle
++
++The case database already holds the original bytes, parsed records, every run and
++its settings, and the audit trail. A bundle packages the same material as plain
++files so another investigator can check it with standard tools and reproduce the
++analysis without access to the original database:
++
++```powershell
++etrace export E:\cases\incident.db --bundle --output E:\handoff\incident.zip
++etrace import-bundle E:\handoff\incident.zip --case E:\cases\incident-rebuilt.db
++```
++
++The zip contains `sources/` (each original EML/MSG named by its SHA-256),
++`case-export.json` (the JSON export, including the audit trail and integrity
++check), `manifest.json` (hashes, sizes, every acquisition name and time, runs and
++their findings digests), `SHA256SUMS` and a short `README.txt`. On Linux or macOS
++`sha256sum -c SHA256SUMS` checks every file; on Windows compare
++`Get-FileHash -Algorithm SHA256` output with `SHA256SUMS`. **Export bundle** in the
++interface downloads the same zip.
++
++`import-bundle` refuses a bundle with any altered, missing, unlisted or oddly
++named file, before creating the case. It then recomputes the original audit hash
++chain, ingests every acquisition under its original name, records an
++`import_bundle` entry (bundle SHA-256 and original audit head) in the new case's
++audit trail, and re-runs each saved analysis with its saved settings on the
++evidence that run used. The report states per run whether the findings (copy
++groups, relationships, diagnostics and statistics) match. Run identifiers also
++match when the Python and extract-msg versions are the same; parsed records note
++those versions, so another machine can give a different identifier with identical
++findings. Runs made with other rule or parser versions are reported as not
++comparable. The latest run is saved in the rebuilt case. The command exits with
++status 1 when the original audit chain or a comparable run does not reproduce.
++The rebuilt case has its own acquisition times and audit trail; the original
++trail stays in `case-export.json`.
++
+ ## Investigator interface
+ 
+ ```powershell
+@@ -425,11 +461,12 @@ the automated evaluations above.
+ | --- | --- |
+ | `src/etrace/parser.py`, `normalize.py` | EML/MSG extraction and conservative normalization |
+ | `src/etrace/case.py` | SQLite evidence, acquisition history, saved runs and verification |
++| `src/etrace/bundle.py` | Portable handoff bundle export, verification, rebuild and reproduction |
+ | `src/etrace/correlate.py`, `model.py` | Indexed deterministic rules, parameters and provenance |
+-| `src/etrace/cli.py` | Case acquisition, analysis, export and server commands |
++| `src/etrace/cli.py` | Case acquisition, analysis, export, bundle import and server commands |
+ | `src/etrace/web.py`, `templates/`, `static/` | Local investigator API and browser interface |
+ | `evaluation/` | Controlled/challenge generator, scoped evaluator, public-corpus preparation, mixing and external threading assessment |
+-| `tests/` | Regression tests for parsing, copy grouping, rules, filters, evaluation scoring, case export and the web API |
++| `tests/` | Regression tests for parsing (including real Outlook MSG fixtures in `tests/fixtures/msg/`, BSD-licensed from msg_parser), copy grouping, rules, filters, evaluation scoring, case export, bundles and the web API |
+ 
+ Run the regression tests from the repository root with
+ `python -m unittest discover -s tests` and lint with `ruff check src tests evaluation`.
+@@ -477,9 +514,16 @@ are not flattened into the outer message. URL extraction covers text bodies,
+ HTML links and resource attributes; it does not inspect attachment contents,
+ follow redirects, fetch remote resources or execute email HTML.
+ 
+-Only stored plain-text and HTML bodies are extracted from MSG files. RTF-only
+-and encrypted bodies remain in the source and produce a limitation warning.
+-The extractor does not synthesize HTML or decompress RTF. Unsupported text MIME
++MSG files are read with extract-msg (installed with E-TRACE). The HTML body
++property is binary (MS-OXPROPS `PidTagHtml`); it is decoded with the message's
++`PidTagInternetCodepage`, then an HTML `<meta charset>`, then UTF-8, and finally
++Windows-1252 with replacement and a `charset_fallback` warning. The codec used and
++its basis are recorded with the part. When no HTML property is stored, Outlook
++often keeps the HTML inside the compressed RTF body; E-TRACE then reconstructs it
++(RTF de-encapsulation) so link targets are searched, labels the part as derived
++from `PidTagRtfCompressed` and adds a `msg_body_from_rtf` observation. Plain RTF
++without encapsulated HTML or text, RTF bodies over 5 MiB, malformed RTF and
++encrypted bodies remain in the source with a limitation warning. Unsupported text MIME
+ types, nested email attachments, malformed encodings and timestamp issues are
+ visible in the evidence record. Plain-text URL punctuation is preserved because
+ it may be part of a valid path; this conservative choice can miss a reuse match
+diff --git a/pyproject.toml b/pyproject.toml
+index 99d740a..38e45cc 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "etrace-forensics"
+-version = "1.4.3"
++version = "1.5.0"
+ description = "Email timeline reconstruction and artifact correlation with evidence provenance"
+ requires-python = ">=3.12"
+ dependencies = ["Flask==3.1.3", "waitress==3.0.2", "extract-msg==0.56.1"]
+diff --git a/src/etrace/__init__.py b/src/etrace/__init__.py
+index 0460b25..5862e7d 100644
+--- a/src/etrace/__init__.py
++++ b/src/etrace/__init__.py
+@@ -1,3 +1,3 @@
+ """Email Timeline Reconstruction and Artifact Correlation Engine."""
+ 
+-__version__ = "1.4.3"
++__version__ = "1.5.0"
+diff --git a/src/etrace/bundle.py b/src/etrace/bundle.py
+new file mode 100644
+index 0000000..995e7ff
+--- /dev/null
++++ b/src/etrace/bundle.py
+@@ -0,0 +1,324 @@
++"""Portable case handoff: original sources, hashes, settings and audit record in one zip.
++
++A bundle can be checked with standard tools (``sha256sum -c SHA256SUMS``) and rebuilt
++with ``etrace import-bundle``, which re-verifies every hash and the original audit
++chain, then re-runs each analysis with its saved settings and compares the findings.
++"""
++
++import io
++import json
++import re
++import zipfile
++from pathlib import Path
++
++from . import __version__
++from .case import Case
++from .correlate import analyze
++from .model import (
++    MAX_FILE_BYTES,
++    PARSER_VERSION,
++    RULE_VERSION,
++    RuleConfig,
++    canonical,
++    digest,
++    object_digest,
++    utc_now,
++)
++
++BUNDLE_VERSION = 1
++MANIFEST, EXPORT, SUMS, README = "manifest.json", "case-export.json", "SHA256SUMS", "README.txt"
++SOURCE_NAME = re.compile(r"sources/([0-9a-f]{64})\.(eml|msg)")
++MAX_JSON_BYTES = 512 * 1024 * 1024
++# Parts of a result that describe what was found, independent of the Python runtime
++# recorded in parsed records (which makes run IDs machine-specific).
++FINDING_KEYS = (
++    "email_ids",
++    "copy_groups",
++    "copy_content_variations",
++    "events",
++    "diagnostics",
++    "statistics",
++)
++
++BUNDLE_README = """E-TRACE case bundle
++===================
++
++sources/       Original evidence files, named by their SHA-256.
++case-export.json  Case metadata, parsed records, every analysis run with its
++               settings, the audit trail and the integrity check at export time.
++manifest.json  Inventory: hashes, sizes, acquisition names and times, runs.
++SHA256SUMS     SHA-256 of every other file in this bundle.
++
++1. Check the files with standard tools
++   Linux/macOS:  sha256sum -c SHA256SUMS
++   Windows:      Get-FileHash -Algorithm SHA256 <file>   (compare with SHA256SUMS)
++
++2. Rebuild the case and reproduce the analysis (E-TRACE {version} or compatible)
++   etrace import-bundle <this-bundle.zip> --case rebuilt.etrace
++
++   The import re-checks every hash and the original audit chain, ingests the
++   original files, re-runs each analysis with its saved settings and reports
++   whether the findings match. The rebuilt case has its own audit trail; the
++   original one is preserved in case-export.json.
++"""
++
++
++def findings_digest(result):
++    return object_digest({key: result.get(key) for key in FINDING_KEYS})
++
++
++def export_bundle(case, target):
++    """Write a bundle to a path (never overwritten) or a binary file object."""
++    export = case.export()
++    with case.connect() as db:
++        run_rows = {
++            row["id"]: row["created_at"] for row in db.execute("SELECT id,created_at FROM runs")
++        }
++    active = export["case"].get("active_run")
++    sources, files = [], {}
++    for record in export["evidence"]:
++        raw, form = case.raw(record["id"])
++        path = f"sources/{record['id']}.{form}"
++        files[path] = raw
++        sources.append(
++            {
++                "path": path,
++                "sha256": record["id"],
++                "size": len(raw),
++                "format": form,
++                "acquisitions": record["sources"],
++            }
++        )
++    runs = [
++        {
++            "id": run["id"],
++            "created_at": run_rows.get(run["id"]),
++            "application_version": run.get("application_version"),
++            "rule_version": run.get("rule_version"),
++            "parser_versions": run.get("parser_versions"),
++            "findings_digest": findings_digest(run),
++            "active": run["id"] == active,
++        }
++        for run in export["runs"]
++    ]
++    manifest = {
++        "bundle_version": BUNDLE_VERSION,
++        "created_at": utc_now(),
++        "application_version": __version__,
++        "parser_version": PARSER_VERSION,
++        "rule_version": RULE_VERSION,
++        "case": {
++            "name": export["case"]["name"],
++            "created_at": export["case"].get("created_at"),
++            "audit_head": export["case"]["audit_head"],
++            "integrity_ok": export["integrity"]["ok"],
++        },
++        "sources": sources,
++        "runs": runs,
++    }
++    files[EXPORT] = json.dumps(export, indent=2, ensure_ascii=True).encode()
++    files[MANIFEST] = json.dumps(manifest, indent=2, ensure_ascii=True).encode()
++    files[README] = BUNDLE_README.format(version=__version__).encode()
++    sums = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(files.items()))
++    files[SUMS] = sums.encode()
++    if isinstance(target, (str, Path)):
++        stream = Path(target).open("xb")
++    else:
++        stream = target
++    try:
++        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
++            for name in sorted(files):
++                bundle.writestr(name, files[name])
++    finally:
++        if stream is not target:
++            stream.close()
++    return {
++        "sources": len(sources),
++        "runs": len(runs),
++        "audit_head": manifest["case"]["audit_head"],
++        "integrity_ok": manifest["case"]["integrity_ok"],
++    }
++
++
++def _read_bundle(path):
++    """Read and hash-check every member; refuse anything unexpected."""
++    with zipfile.ZipFile(path) as bundle:
++        infos = bundle.infolist()
++        names = [info.filename for info in infos]
++        if len(names) != len(set(names)):
++            raise ValueError("Bundle contains duplicate entries.")
++        for info in infos:
++            limit = MAX_FILE_BYTES if info.filename.startswith("sources/") else MAX_JSON_BYTES
++            if (
++                info.filename not in (MANIFEST, EXPORT, SUMS, README)
++                and not SOURCE_NAME.fullmatch(info.filename)
++            ) or info.is_dir():
++                raise ValueError(f"Unexpected bundle entry: {info.filename!r}")
++            if info.file_size > limit:
++                raise ValueError(f"Bundle entry is too large: {info.filename}")
++        missing = {MANIFEST, EXPORT, SUMS} - set(names)
++        if missing:
++            raise ValueError(f"Bundle is missing {', '.join(sorted(missing))}.")
++        files = {name: bundle.read(name) for name in names}
++    listed = {}
++    for line in files.pop(SUMS).decode("ascii").splitlines():
++        value, _, name = line.partition("  ")
++        if not re.fullmatch(r"[0-9a-f]{64}", value) or not name or name in listed:
++            raise ValueError("SHA256SUMS is malformed.")
++        listed[name] = value
++    if set(listed) != set(files):
++        raise ValueError("SHA256SUMS does not list exactly the files in the bundle.")
++    for name, data in files.items():
++        if digest(data) != listed[name]:
++            raise ValueError(f"Hash mismatch for {name}; the bundle was altered or damaged.")
++    return files
++
++
++def _check_original_audit(export, manifest, source_ids):
++    """Recompute the original hash chain from the exported audit trail."""
++    errors, previous = [], "0" * 64
++    runs = {run["id"]: run for run in export["runs"]}
++    for expected_sequence, row in enumerate(export["audit"], 1):
++        if row["sequence"] != expected_sequence:
++            errors.append(f"Audit sequence gap at entry {row['sequence']}")
++        if row["previous_hash"] != previous or row["hash"] != object_digest(
++            [row["timestamp"], row["action"], row["payload"], previous]
++        ):
++            errors.append(f"Audit chain mismatch at entry {row['sequence']}")
++        payload = json.loads(row["payload"])
++        if row["action"] == "ingest" and payload["evidence_id"] not in source_ids:
++            errors.append(f"Audit entry {row['sequence']} names evidence absent from the bundle")
++        if row["action"] == "analyze":
++            run = runs.get(payload["run_id"])
++            if run is None or digest(canonical(run).encode()) != payload["result_hash"]:
++                errors.append(f"Audit entry {row['sequence']} does not match a bundled run")
++        previous = row["hash"]
++    if previous != manifest["case"]["audit_head"] or previous != export["case"]["audit_head"]:
++        errors.append("Audit head does not match the manifest.")
++    for run in export["runs"]:
++        if object_digest({k: v for k, v in run.items() if k != "id"}) != run["id"]:
++            errors.append(f"Bundled run {run['id'][:12]} does not match its identity")
++    return errors
++
++
++def import_bundle(bundle_path, case_path):
++    """Rebuild a case from a bundle and reproduce its analyses. Returns a report."""
++    files = _read_bundle(bundle_path)
++    manifest = json.loads(files[MANIFEST])
++    export = json.loads(files[EXPORT])
++    if manifest.get("bundle_version") != BUNDLE_VERSION:
++        raise ValueError("Unsupported bundle version.")
++    sources = {}
++    for entry in manifest["sources"]:
++        match = SOURCE_NAME.fullmatch(entry["path"])
++        data = files.get(entry["path"])
++        if (
++            match is None
++            or data is None
++            or match.group(1) != entry["sha256"]
++            or digest(data) != entry["sha256"]
++            or len(data) != entry["size"]
++        ):
++            raise ValueError(f"Source does not match the manifest: {entry['path']}")
++        sources[entry["sha256"]] = (data, entry)
++    stray = {name for name in files if name.startswith("sources/")} - {
++        entry[1]["path"] for entry in sources.values()
++    }
++    exported_ids = {record["id"] for record in export["evidence"]}
++    if stray or exported_ids != set(sources):
++        raise ValueError("Bundle sources, manifest and case export do not agree.")
++    audit_errors = _check_original_audit(export, manifest, set(sources))
++
++    case = Case.create(case_path, manifest["case"]["name"])
++    acquisitions = sorted(
++        (acquisition["acquired_at"], acquisition["name"], evidence_id)
++        for evidence_id, (_, entry) in sources.items()
++        for acquisition in entry["acquisitions"]
++    )
++    for _, name, evidence_id in acquisitions:
++        case.ingest_bytes(sources[evidence_id][0], name)
++    case.record_bundle_import(
++        {
++            "bundle_sha256": digest(Path(bundle_path).read_bytes()),
++            "original_case": manifest["case"]["name"],
++            "original_audit_head": manifest["case"]["audit_head"],
++            "original_integrity_ok": manifest["case"]["integrity_ok"],
++            "original_audit_chain_ok": not audit_errors,
++            "sources": len(sources),
++            "acquisitions": len(acquisitions),
++        }
++    )
++
++    records = {record["id"]: record for record in case.records()}
++    active = export["case"].get("active_run")
++    created = {run["id"]: run.get("created_at") or "" for run in manifest["runs"]}
++    reports, to_save = [], None
++    for original in sorted(export["runs"], key=lambda run: (created.get(run["id"], ""), run["id"])):
++        report = {
++            "original_run": original["id"],
++            "created_at": created.get(original["id"]),
++            "original_versions": {
++                "application": original.get("application_version"),
++                "rules": original.get("rule_version"),
++                "parser": original.get("parser_versions"),
++            },
++        }
++        reports.append(report)
++        comparable = original.get("rule_version") == RULE_VERSION and original.get(
++            "parser_versions"
++        ) in ([PARSER_VERSION], [])
++        try:
++            config = RuleConfig(**original["config"])
++            result = analyze([records[i] for i in original["email_ids"]], config)
++        except (TypeError, ValueError, KeyError) as exc:
++            report.update(reproduced=False, comparable=False, note=f"Could not re-run: {exc}")
++            continue
++        report.update(
++            reproduced=True,
++            reproduced_run=result["id"],
++            comparable=comparable,
++            findings_match=findings_digest(result) == findings_digest(original),
++            run_id_match=result["id"] == original["id"],
++        )
++        if not comparable:
++            report["note"] = (
++                f"Made with rules {original.get('rule_version')} and parser "
++                f"{original.get('parser_versions')}; this E-TRACE uses rules {RULE_VERSION} and "
++                f"parser {PARSER_VERSION}, so differences are expected."
++            )
++        elif report["findings_match"] and not report["run_id_match"]:
++            report["note"] = (
++                "Findings match; the run ID differs because parsed records note the Python "
++                "or library version used."
++            )
++        if original["id"] == active and set(original["email_ids"]) == set(records):
++            to_save = result
++    if to_save is not None:
++        case.save_run(to_save)
++    comparable_runs = [r for r in reports if r.get("comparable")]
++    return {
++        "case": str(case.path),
++        "original_case": manifest["case"]["name"],
++        "sources_verified": len(sources),
++        "acquisitions": len(acquisitions),
++        "original_integrity_ok": manifest["case"]["integrity_ok"],
++        "original_audit_chain_ok": not audit_errors,
++        "original_audit_errors": audit_errors,
++        "original_audit_head": manifest["case"]["audit_head"],
++        "runs": reports,
++        "runs_compared": len(comparable_runs),
++        "runs_with_matching_findings": sum(bool(r.get("findings_match")) for r in reports),
++        "saved_run": to_save["id"] if to_save else None,
++        "rebuilt_integrity_ok": case.verify()["ok"],
++        "ok": (
++            not audit_errors
++            and manifest["case"]["integrity_ok"]
++            and all(r["findings_match"] for r in comparable_runs)
++        ),
++    }
++
++
++def bundle_bytes(case):
++    buffer = io.BytesIO()
++    export_bundle(case, buffer)
++    return buffer.getvalue()
+diff --git a/src/etrace/case.py b/src/etrace/case.py
+index ebdd039..e5d2a3d 100644
+--- a/src/etrace/case.py
++++ b/src/etrace/case.py
+@@ -159,6 +159,12 @@ class Case:
+             "warnings": json.loads(exists["record"])["warnings"] if exists else record["warnings"],
+         }
+ 
++    def record_bundle_import(self, payload):
++        """Note in the audit trail that this case was rebuilt from a handoff bundle."""
++        with self.connect() as db:
++            db.execute("BEGIN IMMEDIATE")
++            self._audit(db, "import_bundle", payload)
++
+     def ingest_file(self, path):
+         path = Path(path).expanduser()
+         if path.is_symlink():
+@@ -448,6 +454,9 @@ class Case:
+                         errors.append(f"Analysis audit mismatch at entry {row['sequence']}")
+                     seen_runs.add(payload["run_id"])
+                     last_run = payload["run_id"]
++                elif row["action"] == "import_bundle":
++                    if not {"bundle_sha256", "original_audit_head"} <= set(payload):
++                        errors.append(f"Bundle import record incomplete at entry {row['sequence']}")
+                 else:
+                     errors.append(f"Unknown audit action at entry {row['sequence']}")
+                 previous = row["hash"]
+diff --git a/src/etrace/cli.py b/src/etrace/cli.py
+index e867962..052fbb7 100644
+--- a/src/etrace/cli.py
++++ b/src/etrace/cli.py
+@@ -66,11 +66,27 @@ def main(argv=None):
+         command.add_argument("case", type=Path)
+         if name == "export":
+             command.add_argument("--output", type=Path, required=True)
++            command.add_argument(
++                "--bundle",
++                action="store_true",
++                help="Write a zip with the original sources, hashes, settings and audit record",
++            )
++    restore = commands.add_parser(
++        "import-bundle", help="Rebuild a case from a bundle and reproduce its analyses"
++    )
++    restore.add_argument("bundle", type=Path)
++    restore.add_argument("--case", type=Path, required=True)
+     args = parser.parse_args(argv)
+     try:
+         if args.command == "init":
+             emit(Case.create(args.case, args.name).summary())
+             return 0
++        if args.command == "import-bundle":
++            from .bundle import import_bundle
++
++            report = import_bundle(args.bundle, args.case)
++            emit(report)
++            return 0 if report["ok"] else 1
+         case = Case(args.case)
+         if args.command == "serve":
+             from .web import serve
+@@ -106,6 +122,10 @@ def main(argv=None):
+             result = case.verify()
+             emit(result)
+             return 0 if result["ok"] else 1
++        elif args.command == "export" and args.bundle:
++            from .bundle import export_bundle
++
++            emit({"output": str(args.output.resolve()), **export_bundle(case, args.output)})
+         elif args.command == "export":
+             with args.output.open("x", encoding="utf-8") as stream:
+                 json.dump(case.export(), stream, indent=2, ensure_ascii=True)
+diff --git a/src/etrace/model.py b/src/etrace/model.py
+index 6f28287..a2b7fa1 100644
+--- a/src/etrace/model.py
++++ b/src/etrace/model.py
+@@ -5,7 +5,7 @@ import json
+ from dataclasses import asdict, dataclass
+ from datetime import UTC, datetime
+ 
+-PARSER_VERSION = "1.3.0"
++PARSER_VERSION = "1.4.0"
+ RULE_VERSION = "1.4.1"
+ MAX_FILE_BYTES = 25 * 1024 * 1024
+ MAX_PARTS = 1000
+diff --git a/src/etrace/parser.py b/src/etrace/parser.py
+index 6b4d656..9101275 100644
+--- a/src/etrace/parser.py
++++ b/src/etrace/parser.py
+@@ -1,5 +1,6 @@
+ """Read-only EML and MSG extraction with explicit source locations."""
+ 
++import codecs
+ import html as html_entities
+ import ipaddress
+ import platform
+@@ -28,6 +29,81 @@ from .normalize import (
+ )
+ 
+ URL_PATTERN = re.compile(r"https?://[^\s<>\x00-\x20\x7f\"']+", re.I)
++META_CHARSET = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.I)
++# Windows code page identifiers (PidTagInternetCodepage) whose Python codec is not cpNNN.
++CODEPAGE_CODECS = {
++    65001: "utf-8",
++    65000: "utf-7",
++    1200: "utf-16-le",
++    1201: "utf-16-be",
++    20127: "ascii",
++    20866: "koi8-r",
++    21866: "koi8-u",
++    50220: "iso2022-jp",
++    50221: "iso2022-jp",
++    50222: "iso2022-jp",
++    51932: "euc-jp",
++    51949: "euc-kr",
++    52936: "hz",
++    54936: "gb18030",
++    936: "gbk",
++    28603: "iso8859-13",
++    28605: "iso8859-15",
++    **{28590 + n: f"iso8859-{n}" for n in range(1, 10)},
++}
++MAX_RTF_BYTES = 5 * 1024 * 1024  # De-encapsulation is slow on very large RTF bodies.
++
++
++def codepage_codec(codepage):
++    """Python codec for a Windows code page identifier, or None when unknown."""
++    if not isinstance(codepage, int) or codepage <= 0:
++        return None
++    name = CODEPAGE_CODECS.get(codepage, f"cp{codepage}")
++    try:
++        return codecs.lookup(name).name
++    except LookupError:
++        return None
++
++
++def decode_msg_html(data, codepage):
++    """Decode the binary PidTagHtml stream.
++
++    MS-OXPROPS stores the HTML body as binary; its character set is the message's
++    PidTagInternetCodepage. Try that, then a <meta charset>, then UTF-8. Return the
++    text, the codec used, what it was based on, and an optional warning message.
++    """
++    candidates = []
++    declared = codepage_codec(codepage)
++    if declared:
++        candidates.append((declared, f"PidTagInternetCodepage {codepage}"))
++    meta = META_CHARSET.search(data[:4096])
++    if meta:
++        try:
++            candidates.append(
++                (codecs.lookup(meta.group(1).decode("ascii")).name, "HTML meta charset")
++            )
++        except (LookupError, UnicodeError):
++            pass
++    candidates.append(("utf-8", "UTF-8 default"))
++    for codec, basis in candidates:
++        try:
++            text = data.decode(codec, "strict")
++        except (UnicodeError, LookupError):
++            continue
++        warning = None
++        if declared and codec != declared:
++            warning = (
++                f"HTML bytes are not valid {declared} (PidTagInternetCodepage {codepage}); "
++                f"decoded as {codec} from the {basis}."
++            )
++        return text, codec, basis, warning
++    return (
++        data.decode("cp1252", "replace"),
++        "cp1252",
++        "replacement fallback",
++        "MSG HTML matched no declared or default character set; decoded as Windows-1252, "
++        "with any undecodable bytes replaced. The original bytes remain in the source.",
++    )
+ 
+ 
+ class LinkParser(HTMLParser):
+@@ -98,10 +174,14 @@ def parse_email(raw, filename):
+         return _parse_email(raw, filename)
+     except (RecursionError, LookupError, UnicodeError) as exc:
+         raise ValueError(f"Email parsing failed: {type(exc).__name__}: {exc}") from exc
++    except ValueError:
++        raise
+     except Exception as exc:
+         if Path(filename).suffix.lower() == ".msg":
+-            from extract_msg.exceptions import ExMsgBaseException
+-
++            try:
++                from extract_msg.exceptions import ExMsgBaseException
++            except ImportError:
++                raise
+             if isinstance(exc, ExMsgBaseException):
+                 raise ValueError(f"Outlook parsing failed: {exc}") from exc
+         raise
+@@ -449,7 +529,14 @@ def _parse_email(raw, filename):
+         visit(message, "mime:1")
+         record["content_digest"] = object_digest(content_parts)
+     else:
+-        import extract_msg
++        try:
++            import extract_msg
++        except ImportError as exc:
++            raise ValueError(
++                "Reading .msg files needs the extract-msg package; install E-TRACE with "
++                "'pip install -e .' (or 'pip install extract-msg==0.56.1'). "
++                "This file was not ingested."
++            ) from exc
+ 
+         record["parser_runtime"]["extract_msg"] = extract_msg.__version__
+ 
+@@ -488,19 +575,78 @@ def _parse_email(raw, filename):
+                 extract_text(body, "text/plain", "msg:stream:__substg1.0_1000")
+             else:
+                 content_parts = []
++            html_location = "msg:stream:__substg1.0_10130102"
+             if html:
++                codepage = message.getPropertyVal("3FDE0003")
++                text, codec, basis, problem = decode_msg_html(html, codepage)
++                if problem:
++                    warn("charset_fallback", problem, html_location)
++                extract_text(text, "text/html", html_location)
++                record["parts"][-1].update(charset=codec, charset_basis=basis)
++                content_parts.append(("text/html", digest(html)))
++            else:
++                # Outlook often keeps the HTML body only inside the compressed RTF body
++                # (PidTagRtfCompressed). Reconstruct it so link targets are searched; the
++                # result is derived content and is labelled as such.
++                rtf_location = "msg:stream:__substg1.0_10090102"
+                 try:
+-                    html = html.decode("utf-8", "strict")
+-                except UnicodeError:
+-                    html = html.decode("utf-8", "replace")
++                    rtf = message.rtfBody
++                except Exception as exc:  # noqa: BLE001 - library raises varied errors
++                    rtf = None
++                    warn("msg_rtf_unreadable", f"Compressed RTF body could not be read: {exc}", rtf_location)
++                encapsulated = None
++                if rtf and len(rtf) > MAX_RTF_BYTES:
++                    warn(
++                        "msg_rtf_not_expanded",
++                        "RTF body exceeds 5 MiB and was not de-encapsulated; it remains in the source.",
++                        rtf_location,
++                    )
++                elif rtf:
++                    try:
++                        encapsulated = message.deencapsulatedRtf
++                    except Exception as exc:  # noqa: BLE001 - RTFDE raises parser errors
++                        warn(
++                            "msg_rtf_not_expanded",
++                            f"RTF body could not be de-encapsulated ({type(exc).__name__}); "
++                            "it remains in the source and was not searched.",
++                            rtf_location,
++                        )
++                derived = None
++                if encapsulated is not None and encapsulated.content_type == "html":
++                    derived = ("text/html", encapsulated.html, "html")
++                elif encapsulated is not None and not body and encapsulated.text:
++                    derived = ("text/plain", encapsulated.text, "text")
++                elif rtf and encapsulated is None and not body:
++                    warn(
++                        "msg_rtf_not_expanded",
++                        "Only a plain RTF body is stored; it remains in the source and was not searched.",
++                        rtf_location,
++                    )
++                if derived:
++                    content_type, value, kind = derived
++                    data = value if isinstance(value, bytes) else value.encode("utf-8")
++                    try:
++                        text = data.decode("utf-8", "strict")
++                    except UnicodeError:
++                        text = data.decode("utf-8", "replace")
++                        warn(
++                            "charset_fallback",
++                            "RTF-derived body decoded with UTF-8 replacement characters.",
++                            rtf_location,
++                        )
++                    location = f"{rtf_location}:encapsulated-{kind}"
++                    extract_text(text, content_type, location)
++                    record["parts"][-1].update(derived_from="PidTagRtfCompressed")
++                    content_parts.append((f"{content_type};rtf-derived", digest(data)))
+                     warn(
+-                        "charset_fallback",
+-                        "MSG HTML decoded with UTF-8 replacement; original bytes remain in the source.",
+-                        "msg:stream:__substg1.0_10130102",
++                        "msg_body_from_rtf",
++                        f"The {kind.upper()} body was reconstructed from the compressed RTF body; "
++                        "it is derived content and the original bytes remain in the source.",
++                        location,
+                     )
+-                extract_text(html, "text/html", "msg:stream:__substg1.0_10130102")
+-                content_parts.append(("text/html", digest(html.encode("utf-8"))))
+-            if not body and not html:
++            if not body and not html and not any(
++                part.get("derived_from") for part in record["parts"]
++            ):
+                 warn(
+                     "unsupported_msg_body",
+                     "No stored plain-text or HTML body; RTF and encrypted content remain in the source and are not expanded.",
+diff --git a/src/etrace/templates/index.html b/src/etrace/templates/index.html
+index 7749bb8..0e1098c 100644
+--- a/src/etrace/templates/index.html
++++ b/src/etrace/templates/index.html
+@@ -65,6 +65,12 @@
+           <div class="actions">
+             <a class="button secondary" href="/api/export" download
+               >Export case</a
++            ><a
++              class="button secondary"
++              href="/api/export-bundle"
++              download
++              title="Zip with the original files, hashes, settings and audit record"
++              >Export bundle</a
+             ><button id="import-open" class="button secondary">
+               Import evidence</button
+             ><button id="analyze-open" class="button primary">
+diff --git a/src/etrace/web.py b/src/etrace/web.py
+index 8dd9f3a..dd5e18c 100644
+--- a/src/etrace/web.py
++++ b/src/etrace/web.py
+@@ -347,6 +347,17 @@ def create_app(case_path):
+             download_name="etrace-evidence-export.json",
+         )
+ 
++    @app.get("/api/export-bundle")
++    def export_bundle():
++        from .bundle import bundle_bytes
++
++        return send_file(
++            io.BytesIO(bundle_bytes(case)),
++            mimetype="application/zip",
++            as_attachment=True,
++            download_name="etrace-case-bundle.zip",
++        )
++
+     return app
+ 
+ 
+diff --git a/tests/fixtures/msg/LICENSE-msg_parser.txt b/tests/fixtures/msg/LICENSE-msg_parser.txt
+new file mode 100644
+index 0000000..85fcb8d
+--- /dev/null
++++ b/tests/fixtures/msg/LICENSE-msg_parser.txt
+@@ -0,0 +1,22 @@
++Copyright (c) 2009-2019 Vikram Arsid <vikramarsid@gmail.com>
++
++Redistribution and use in source and binary forms, with or without modification, are
++permitted provided that the following conditions are met:
++
++   1. Redistributions of source code must retain the above copyright notice, this list of
++      conditions and the following disclaimer.
++
++   2. Redistributions in binary form must reproduce the above copyright notice, this list
++   of conditions and the following disclaimer in the documentation and/or other materials
++   provided with the distribution.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS
++OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
++GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++OF THE POSSIBILITY OF SUCH DAMAGE.
++
+diff --git a/tests/fixtures/msg/README.md b/tests/fixtures/msg/README.md
+new file mode 100644
+index 0000000..6d07dc4
+--- /dev/null
++++ b/tests/fixtures/msg/README.md
+@@ -0,0 +1,12 @@
++# Outlook MSG fixtures
++
++`other.msg` and `outer.msg` are real Outlook items copied unchanged from the test
++suite of [msg_parser](https://pypi.org/project/msg-parser/) 1.2.0
++(`tests/files/`), BSD-licensed; see `LICENSE-msg_parser.txt`.
++
++| File | Code page | HTML stream | Body source |
++| --- | --- | --- | --- |
++| `other.msg` | 936 (GBK) | none | HTML encapsulated in compressed RTF; Chinese text |
++| `outer.msg` | 20127 (ASCII) | none | HTML encapsulated in compressed RTF; transport headers absent |
++
++Both contain an embedded Outlook item as an attachment.
+diff --git a/tests/test_bundle.py b/tests/test_bundle.py
+new file mode 100644
+index 0000000..be1f62e
+--- /dev/null
++++ b/tests/test_bundle.py
+@@ -0,0 +1,156 @@
++"""Portable case bundles: export, tamper detection, rebuild and reproduction."""
++
++import contextlib
++import io
++import json
++import sys
++import tempfile
++import unittest
++import zipfile
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "src"))
++sys.path.insert(0, str(ROOT / "tests"))
++
++from test_case_web import raw_email  # noqa: E402
++
++from etrace.bundle import export_bundle, import_bundle  # noqa: E402
++from etrace.case import Case  # noqa: E402
++from etrace.cli import main  # noqa: E402
++from etrace.correlate import analyze  # noqa: E402
++from etrace.model import RuleConfig, digest  # noqa: E402
++from etrace.web import create_app  # noqa: E402
++
++
++class BundleTests(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory(dir=ROOT)
++        self.root = Path(self.directory.name)
++        self.case = Case.create(self.root / "case.db", "Handoff")
++        self.case.ingest_bytes(raw_email("one"), "inbox/one.eml")
++        self.older = self.case.save_run(analyze(self.case.records()))
++        self.case.ingest_bytes(raw_email("two"), "inbox/two.eml")
++        self.case.ingest_bytes(raw_email("two"), "copies/two.eml")  # second acquisition
++        self.latest = self.case.save_run(
++            analyze(self.case.records(), RuleConfig(excluded_url_domains=["example.com"]))
++        )
++        self.bundle = self.root / "handoff.zip"
++        self.summary = export_bundle(self.case, self.bundle)
++
++    def tearDown(self):
++        self.directory.cleanup()
++
++    def rewrite(self, change):
++        """Copy the bundle with one change, keeping SHA256SUMS as is unless changed."""
++        with zipfile.ZipFile(self.bundle) as source:
++            files = {name: source.read(name) for name in source.namelist()}
++        change(files)
++        altered = self.root / "altered.zip"
++        with zipfile.ZipFile(altered, "w") as target:
++            for name, data in files.items():
++                target.writestr(name, data)
++        return altered
++
++    def test_bundle_holds_sources_hashes_settings_and_audit(self):
++        self.assertEqual((self.summary["sources"], self.summary["runs"]), (2, 2))
++        self.assertTrue(self.summary["integrity_ok"])
++        with zipfile.ZipFile(self.bundle) as bundle:
++            names = set(bundle.namelist())
++            manifest = json.loads(bundle.read("manifest.json"))
++            export = json.loads(bundle.read("case-export.json"))
++            sums = bundle.read("SHA256SUMS").decode()
++            for line in sums.splitlines():  # the same check as sha256sum -c
++                value, name = line.split("  ")
++                self.assertEqual(digest(bundle.read(name)), value)
++            for entry in manifest["sources"]:
++                self.assertEqual(digest(bundle.read(entry["path"])), entry["sha256"])
++        self.assertIn("README.txt", names)
++        self.assertEqual(len([n for n in names if n.startswith("sources/")]), 2)
++        self.assertEqual(manifest["case"]["audit_head"], self.case.verify()["audit_head"])
++        two = next(e for e in manifest["sources"] if len(e["acquisitions"]) == 2)
++        self.assertEqual(
++            sorted(a["name"] for a in two["acquisitions"]), ["copies/two.eml", "inbox/two.eml"]
++        )
++        configs = {run["id"]: run["config"] for run in export["runs"]}
++        self.assertEqual(configs[self.latest["id"]]["excluded_url_domains"], ["example.com"])
++        self.assertEqual([r["active"] for r in manifest["runs"]].count(True), 1)
++        with self.assertRaises(FileExistsError):  # never overwrites
++            export_bundle(self.case, self.bundle)
++
++    def test_import_rebuilds_the_case_and_reproduces_every_run(self):
++        report = import_bundle(self.bundle, self.root / "rebuilt.db")
++        self.assertTrue(report["ok"])
++        self.assertTrue(report["original_audit_chain_ok"])
++        self.assertTrue(report["rebuilt_integrity_ok"])
++        self.assertEqual((report["sources_verified"], report["acquisitions"]), (2, 3))
++        self.assertEqual(report["runs_compared"], 2)
++        by_run = {r["original_run"]: r for r in report["runs"]}
++        for original in (self.older, self.latest):  # the older run used a subset of evidence
++            self.assertTrue(by_run[original["id"]]["findings_match"])
++            self.assertTrue(by_run[original["id"]]["run_id_match"])  # same Python here
++        self.assertEqual(report["saved_run"], self.latest["id"])
++        rebuilt = Case(self.root / "rebuilt.db")
++        self.assertEqual(rebuilt.run()["id"], self.latest["id"])
++        self.assertFalse(rebuilt.run_status()["stale"])
++        audit = rebuilt.export()["audit"]
++        imports = [row for row in audit if row["action"] == "import_bundle"]
++        self.assertEqual(len(imports), 1)
++        self.assertIn(self.summary["audit_head"], imports[0]["payload"])
++
++    def test_altered_source_or_unlisted_file_is_refused(self):
++        def swap_source(files):
++            name = next(n for n in files if n.startswith("sources/"))
++            files[name] = files[name].replace(b"Shared", b"Shored")
++
++        def add_file(files):
++            files["sources/../../evil.eml"] = b"x"
++
++        def fix_sums_but_not_name(files):
++            name = next(n for n in files if n.startswith("sources/"))
++            files[name] = files[name] + b"\r\n"
++            files["SHA256SUMS"] = "".join(
++                f"{digest(data)}  {n}\n" for n, data in sorted(files.items()) if n != "SHA256SUMS"
++            ).encode()
++
++        for change, message in (
++            (swap_source, "Hash mismatch"),
++            (add_file, "Unexpected bundle entry"),
++            (fix_sums_but_not_name, "does not match the manifest"),
++        ):
++            with self.subTest(change=change.__name__):
++                target = self.root / f"{change.__name__}.db"
++                with self.assertRaisesRegex(ValueError, message):
++                    import_bundle(self.rewrite(change), target)
++                self.assertFalse(target.exists())
++
++    def test_tampered_original_audit_is_reported(self):
++        def edit_audit(files):
++            export = json.loads(files["case-export.json"])
++            export["audit"][1]["timestamp"] = "2000-01-01T00:00:00.000000Z"
++            files["case-export.json"] = json.dumps(export).encode()
++            files["SHA256SUMS"] = "".join(
++                f"{digest(data)}  {n}\n" for n, data in sorted(files.items()) if n != "SHA256SUMS"
++            ).encode()
++
++        report = import_bundle(self.rewrite(edit_audit), self.root / "audit.db")
++        self.assertFalse(report["ok"])
++        self.assertFalse(report["original_audit_chain_ok"])
++        self.assertTrue(any("entry 2" in e for e in report["original_audit_errors"]))
++
++    def test_cli_and_web_export_bundles(self):
++        output = io.StringIO()
++        with contextlib.redirect_stdout(output):
++            status = main(["export", str(self.case.path), "--bundle", "--output", str(self.root / "cli.zip")])
++            self.assertEqual(status, 0)
++            status = main(["import-bundle", str(self.root / "cli.zip"), "--case", str(self.root / "cli.db")])
++        self.assertEqual(status, 0)
++        response = create_app(self.case.path).test_client().get("/api/export-bundle")
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.mimetype, "application/zip")
++        with zipfile.ZipFile(io.BytesIO(response.data)) as bundle:
++            self.assertIn("SHA256SUMS", bundle.namelist())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_msg.py b/tests/test_msg.py
+new file mode 100644
+index 0000000..f0c2e02
+--- /dev/null
++++ b/tests/test_msg.py
+@@ -0,0 +1,88 @@
++"""Outlook MSG parsing: real fixtures, HTML code pages and RTF-encapsulated bodies."""
++
++import importlib.util
++import sys
++import unittest
++from pathlib import Path
++from unittest import mock
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "src"))
++
++from etrace.parser import codepage_codec, decode_msg_html, parse_email  # noqa: E402
++
++FIXTURES = ROOT / "tests" / "fixtures" / "msg"
++HAS_EXTRACT_MSG = importlib.util.find_spec("extract_msg") is not None
++
++
++class MsgHtmlDecodingTests(unittest.TestCase):
++    PAGE = '<p>Café invoice: <a href="https://portal.vendor.example/résumé">view</a></p>'
++
++    def test_declared_code_page_is_used(self):
++        text, codec, basis, problem = decode_msg_html(self.PAGE.encode("cp1252"), 1252)
++        self.assertIn("résumé", text)
++        self.assertEqual((codec, basis, problem), ("cp1252", "PidTagInternetCodepage 1252", None))
++
++    def test_code_page_table_covers_common_outlook_values(self):
++        for codepage, expected in ((65001, "utf-8"), (936, "gbk"), (20127, "ascii"), (28591, "iso8859-1"), (50220, "iso2022_jp"), (1251, "cp1251")):
++            with self.subTest(codepage=codepage):
++                self.assertEqual(codepage_codec(codepage), expected)
++        self.assertIsNone(codepage_codec(None))
++        self.assertIsNone(codepage_codec(99999))
++
++    def test_meta_charset_then_utf8_when_no_code_page(self):
++        page = '<meta http-equiv="Content-Type" content="text/html; charset=gb2312">发票'
++        text, codec, basis, problem = decode_msg_html(page.encode("gb2312"), None)
++        self.assertIn("发票", text)
++        self.assertEqual((codec, basis, problem), ("gb2312", "HTML meta charset", None))
++        text, codec, basis, _ = decode_msg_html(self.PAGE.encode("utf-8"), None)
++        self.assertEqual((codec, basis), ("utf-8", "UTF-8 default"))
++
++    def test_bytes_that_contradict_the_code_page_are_flagged(self):
++        text, codec, _, problem = decode_msg_html(self.PAGE.encode("cp1252"), 65001)
++        self.assertEqual(codec, "cp1252")
++        self.assertIn("r\u00e9sum\u00e9", text)  # last-resort Windows-1252 decode
++        self.assertIn("Windows-1252", problem)
++        text, codec, basis, problem = decode_msg_html(self.PAGE.encode("utf-8"), 20127)
++        self.assertEqual((codec, basis), ("utf-8", "UTF-8 default"))
++        self.assertIn("not valid ascii", problem)
++
++
++@unittest.skipUnless(HAS_EXTRACT_MSG, "extract-msg is not installed (pip install -e .)")
++class RealMsgFixtureTests(unittest.TestCase):
++    def parse(self, name):
++        return parse_email((FIXTURES / name).read_bytes(), name)
++
++    def test_html_is_reconstructed_from_compressed_rtf(self):
++        for name in ("other.msg", "outer.msg"):
++            with self.subTest(name=name):
++                record = self.parse(name)
++                derived = [p for p in record["parts"] if p.get("derived_from")]
++                self.assertEqual(len(derived), 1)
++                self.assertEqual(derived[0]["content_type"], "text/html")
++                self.assertTrue(derived[0]["location"].endswith(":encapsulated-html"))
++                self.assertIn("msg_body_from_rtf", {w["code"] for w in record["warnings"]})
++                self.assertNotIn("unsupported_msg_body", {w["code"] for w in record["warnings"]})
++
++    def test_non_utf8_code_page_text_is_readable(self):
++        record = self.parse("other.msg")  # PidTagInternetCodepage 936 (GBK)
++        self.assertIn("这是服务器", record["body_preview"])
++        self.assertNotIn("charset_fallback", {w["code"] for w in record["warnings"]})
++
++    def test_embedded_items_and_missing_transport_headers_are_reported(self):
++        record = self.parse("outer.msg")
++        codes = {w["code"] for w in record["warnings"]}
++        self.assertTrue({"synthesized_headers", "embedded_msg_item", "missing_date"} <= codes)
++        self.assertEqual(record["format"], "msg")
++
++
++class MissingExtractMsgTests(unittest.TestCase):
++    def test_clear_error_when_extract_msg_is_absent(self):
++        raw = (FIXTURES / "outer.msg").read_bytes()
++        with mock.patch.dict(sys.modules, {"extract_msg": None, "extract_msg.exceptions": None}):
++            with self.assertRaisesRegex(ValueError, "needs the extract-msg package"):
++                parse_email(raw, "outer.msg")
++
++
++if __name__ == "__main__":
++    unittest.main()

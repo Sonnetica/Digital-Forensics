@@ -159,6 +159,12 @@ class Case:
             "warnings": json.loads(exists["record"])["warnings"] if exists else record["warnings"],
         }
 
+    def record_bundle_import(self, payload):
+        """Note in the audit trail that this case was rebuilt from a handoff bundle."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._audit(db, "import_bundle", payload)
+
     def ingest_file(self, path):
         path = Path(path).expanduser()
         if path.is_symlink():
@@ -448,6 +454,9 @@ class Case:
                         errors.append(f"Analysis audit mismatch at entry {row['sequence']}")
                     seen_runs.add(payload["run_id"])
                     last_run = payload["run_id"]
+                elif row["action"] == "import_bundle":
+                    if not {"bundle_sha256", "original_audit_head"} <= set(payload):
+                        errors.append(f"Bundle import record incomplete at entry {row['sequence']}")
                 else:
                     errors.append(f"Unknown audit action at entry {row['sequence']}")
                 previous = row["hash"]

@@ -19,6 +19,7 @@ htmlcov/
 *.eml
 !/demo email/*.eml
 *.msg
+!/tests/fixtures/msg/*.msg
 *.mbox
 *.pst
 *.ost

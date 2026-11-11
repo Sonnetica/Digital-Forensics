@@ -347,6 +347,17 @@ def create_app(case_path):
             download_name="etrace-evidence-export.json",
         )
 
+    @app.get("/api/export-bundle")
+    def export_bundle():
+        from .bundle import bundle_bytes
+
+        return send_file(
+            io.BytesIO(bundle_bytes(case)),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="etrace-case-bundle.zip",
+        )
+
     return app
 
 
