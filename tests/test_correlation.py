@@ -70,6 +70,73 @@ class CorrelationTests(unittest.TestCase):
         self.assertFalse(any(d["code"] == "ambiguous_parent" for d in result["diagnostics"]))
         self.assertEqual(result["statistics"]["copy_groups"], 1)
 
+    def test_rfc6854_empty_from_group_is_preserved_and_copies_link(self):
+        parent_id = "<automated@example.org>"
+        sent = email("sent", message_id=parent_id, sender="Automated System:;", mailbox="sent")
+        inbox = email("inbox", message_id=parent_id, sender="Automated System:;", mailbox="inbox")
+        child = email("reply", parent=parent_id)
+        self.assertEqual(sent["senders"], [])
+        self.assertEqual(
+            [group for group in sent["originator_groups"] if group["field"] == "from"][0],
+            {
+                "field": "from", "name": "Automated System", "addresses": [],
+                "location": "header:0",
+            },
+        )
+        self.assertFalse(any(w["code"] == "originator_parse_error" for w in sent["warnings"]))
+        result = analyze([sent, inbox, child])
+        replies = [event for event in result["events"] if event["type"] == "reply"]
+        self.assertEqual(result["statistics"]["copy_groups"], 1)
+        self.assertEqual(set(replies[0]["direction"]["parent_copies"]), {sent["id"], inbox["id"]})
+
+    def test_rfc6854_empty_group_requires_matching_content(self):
+        parent_id = "<automated@example.org>"
+        first = email("first", message_id=parent_id, sender="Automated System:;", body="alpha")
+        second = email("second", message_id=parent_id, sender="Automated System:;", body="beta")
+        child = email("child", parent=parent_id)
+        result = analyze([first, second, child])
+        self.assertEqual(result["statistics"]["copy_groups"], 0)
+        self.assertTrue(any(d["code"] == "ambiguous_parent" for d in result["diagnostics"]))
+
+    def test_rfc6854_group_names_are_part_of_copy_identity(self):
+        parent_id = "<group@example.org>"
+        first = email("first", message_id=parent_id, sender="Team One: alice@example.org;")
+        second = email("second", message_id=parent_id, sender="Team Two: alice@example.org;")
+        self.assertEqual([s["address"] for s in first["senders"]], ["alice@example.org"])
+        self.assertEqual(analyze([first, second])["statistics"]["copy_groups"], 0)
+
+    def test_rfc6854_sender_and_resent_groups_are_distinct_from_authors(self):
+        record = email(
+            "group", sender="Team: alice@example.org, bob@example.org;",
+            headers=(
+                ("Sender", "Agent: carol@example.org;"),
+                ("Resent-From", "Resent Team: dave@example.org;"),
+                ("Resent-Sender", "Resender: eve@example.org;"),
+            ),
+        )
+        self.assertEqual(
+            {sender["address"] for sender in record["senders"]},
+            {"alice@example.org", "bob@example.org"},
+        )
+        groups = {group["field"]: group for group in record["originator_groups"]}
+        self.assertEqual(groups["sender"]["name"], "Agent")
+        self.assertEqual(groups["sender"]["addresses"][0]["address"], "carol@example.org")
+        self.assertEqual(groups["resent-from"]["name"], "Resent Team")
+        self.assertEqual(groups["resent-sender"]["name"], "Resender")
+        self.assertFalse(any(w["code"] == "missing_sender_header" for w in record["warnings"]))
+
+    def test_rfc6854_invalid_originator_cardinality_is_reported(self):
+        missing_sender = email(
+            "missing-sender", sender="Team: alice@example.org, bob@example.org;"
+        )
+        self.assertIn("missing_sender_header", {w["code"] for w in missing_sender["warnings"]})
+        multiple_sender = email(
+            "multiple-sender", headers=(("Sender", "Agents: a@example.org, b@example.org;"),)
+        )
+        self.assertIn(
+            "multiple_sender_mailboxes", {w["code"] for w in multiple_sender["warnings"]}
+        )
+
     def test_reused_message_id_with_different_content_stays_ambiguous(self):
         parent_id = "<collision@example.org>"
         first = email("one", message_id=parent_id, body="alpha invoice schedule " * 12)

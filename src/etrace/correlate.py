@@ -89,8 +89,43 @@ def analyze(records, config=None):
     # A physical file remains evidence. Only strongly matching parsed messages
     # share a logical identity for relationship rules.
     header_groups = defaultdict(list)
+
+    def group_signature(groups):
+        return tuple(
+            (
+                group["name"].casefold() if group["name"] is not None else None,
+                tuple(
+                    ((member["name"] or "").casefold(), member["address"].casefold())
+                    for member in group["addresses"]
+                ),
+            )
+            for group in groups
+        )
+
     for record in records:
         senders = sorted({s["address"].casefold() for s in record["senders"]})
+        from_groups = [
+            group for group in record.get("originator_groups", []) if group["field"] == "from"
+        ]
+        sender_groups = [
+            group for group in record.get("originator_groups", []) if group["field"] == "sender"
+        ]
+
+        has_named_from_group = any(group["name"] is not None for group in from_groups)
+        from_header_count = sum(h["name"].lower() == "from" for h in record["headers"])
+        if has_named_from_group and from_header_count == 1:
+            # An empty group has no address to use as identity. Require equal
+            # decoded content as well as the same group and stable headers.
+            from_identity = (
+                "group",
+                group_signature(from_groups),
+                group_signature(sender_groups),
+                record["content_digest"] if not senders else None,
+            )
+        elif len(senders) == 1:
+            from_identity = ("mailbox", senders[0])
+        else:
+            from_identity = None
         recipients = sorted(
             {r["address"].casefold() for r in record["recipients"] if r["field"] in ("to", "cc")}
         )
@@ -98,13 +133,13 @@ def analyze(records, config=None):
         if (
             len(record["message_ids"]) == 1
             and message_id_headers == 1
-            and len(senders) == 1
+            and from_identity is not None
             and record["date_utc"]
             and record.get("content_digest")
         ):
             key = (
                 record["message_ids"][0],
-                senders[0],
+                from_identity,
                 record["date_utc"],
                 record["subject"].strip().casefold(),
                 tuple(recipients),

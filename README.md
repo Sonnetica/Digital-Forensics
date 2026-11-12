@@ -156,7 +156,7 @@ receives its own edge, marked `multiple_in_reply_to` in the edge context and in
 the run diagnostics, so no single edge is presented as the only parent.
 
 Transport-header variants are grouped as copies when their single Message-ID,
-sender, Date, subject, To/Cc recipients and reply headers agree, plus either the
+From identity, Date, subject, To/Cc recipients and reply headers agree, plus either the
 decoded content digest matches or the only differences are recognised
 link-protection rewrites. For that comparison the parser records a fingerprint of
 the full decoded content of every part, including HTML markup, attributes,
@@ -170,6 +170,14 @@ keeps the files apart, and a reply to their
 shared Message-ID stays an ambiguous parent. A gateway that changes markup as
 well as links (for example by adding a warning banner) also leaves its copies
 ambiguous.
+
+RFC 6854 permits named groups in From, Sender, Resent-From and Resent-Sender,
+including an empty group with no mailbox. E-TRACE preserves the group labels and
+members separately from the original header. From members remain claimed authors;
+Sender is shown separately as the claimed transmitting agent. An empty From group
+is displayed without inventing an address or domain. Copies using named From
+groups must agree on the group structure and any Sender field. For an empty From
+group, the decoded content digest must also match before copies are grouped.
 
 Recognised wrappers are HTTPS links on the provider's own domains only:
 Microsoft Defender Safe Links on `safelinks.protection.outlook.com` and
@@ -266,9 +274,10 @@ organisation-domain and routine-background rules; 1.3.0 made the organisation
 domain an investigator-confirmed setting and limited link-wrapper recognition to
 provider domains; 1.4.0 required the full decoded content, markup included, to
 match before files are grouped as copies; 1.4.1 added attachment filenames and
-dispositions to that comparison. Precision and recall from older labels
+dispositions to that comparison; 1.4.2 adds RFC 6854 From-group identity to copy
+matching. Precision and recall from older labels
 are not a valid benchmark for the current rules. The evaluator reports
-`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.1 and
+`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.2 and
 review any external corpus labels against the new rule table. Corpora that use a
 fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
 grouping.
@@ -496,7 +505,8 @@ not generated evidence, databases, exports, build products, reports or slides.
   raise the explicit CLI limits. The failed run is not saved as a complete result.
 
 Parsing and relationship semantics are informed by
-[RFC 5322](https://www.rfc-editor.org/rfc/rfc5322.html), URL normalization by
+[RFC 5322](https://www.rfc-editor.org/rfc/rfc5322.html) and its
+[RFC 6854](https://www.rfc-editor.org/rfc/rfc6854.html) originator-field update, URL normalization by
 [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html), and implementation APIs by
 the [Python email documentation](https://docs.python.org/3/library/email.parser.html)
 and [Flask security documentation](https://flask.palletsprojects.com/en/stable/web-security/).

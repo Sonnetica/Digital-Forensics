@@ -12,7 +12,7 @@ from itertools import combinations
 from pathlib import Path
 
 RULES = ("attachment_reuse", "url_reuse", "reply", "possible_coordination")
-RULE_VERSION = "1.4.1"  # Declares the rule definitions used by generated conformance labels.
+RULE_VERSION = "1.4.2"  # Declares the rule definitions used by generated conformance labels.
 TIERS = {"simple": (1, 6), "medium": (4, 40), "complex": (12, 160), "challenge": (0, 0)}
 
 

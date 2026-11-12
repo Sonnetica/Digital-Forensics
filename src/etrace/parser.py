@@ -210,6 +210,7 @@ def _parse_email(raw, filename):
         "references": [],
         "subject": "",
         "senders": [],
+        "originator_groups": [],
         "recipients": [],
         "date_utc": None,
         "received_utc": None,
@@ -250,10 +251,42 @@ def _parse_email(raw, filename):
             record["headers"].append(entry)
             for defect in getattr(value, "defects", ()):
                 warn(type(defect).__name__, str(defect) or "Malformed header.", location)
+            if name.lower() in ("from", "sender", "resent-from", "resent-sender"):
+                try:
+                    structured = value if hasattr(value, "groups") else policy.default.header_factory(
+                        name, str(value)
+                    )
+                    parsed_groups = []
+                    for group in structured.groups:
+                        parsed_groups.append(
+                            {
+                                "field": name.lower(),
+                                "name": group.display_name,
+                                "addresses": [
+                                    {
+                                        "name": address.display_name,
+                                        "address": address.addr_spec,
+                                        "domain": address_domain(address.addr_spec),
+                                    }
+                                    for address in group.addresses
+                                    if address.addr_spec
+                                ],
+                                "location": location,
+                            }
+                        )
+                    record["originator_groups"].extend(parsed_groups)
+                except (AttributeError, IndexError, ValueError) as exc:
+                    warn(
+                        "originator_parse_error",
+                        str(exc) or "Originator header could not be parsed.",
+                        location,
+                    )
         lookup = {}
         for header in record["headers"]:
             lookup.setdefault(header["name"].lower(), []).append(header)
-        for name in ("message-id", "date", "from", "subject", "in-reply-to", "references"):
+        for name in (
+            "message-id", "date", "from", "sender", "subject", "in-reply-to", "references"
+        ):
             if len(lookup.get(name, [])) > 1:
                 warn(
                     "duplicate_header", f"Multiple {name} headers; all values are preserved.", name
@@ -290,12 +323,34 @@ def _parse_email(raw, filename):
                 "No usable Message-ID; source SHA-256 remains the evidence identity.",
                 "header",
             )
-        for field in ("from", "to", "cc", "bcc", "reply-to", "return-path"):
+        for field in (
+            "from",
+            "sender",
+            "resent-from",
+            "resent-sender",
+            "to",
+            "cc",
+            "bcc",
+            "reply-to",
+            "return-path",
+        ):
             for header in lookup.get(field, []):
-                try:
-                    addresses = getaddresses([header["value"]])
-                except (ValueError, IndexError):
-                    addresses = []
+                groups = [
+                    group
+                    for group in record["originator_groups"]
+                    if group["location"] == header["location"]
+                ]
+                if groups:
+                    addresses = [
+                        (member["name"], member["address"])
+                        for group in groups
+                        for member in group["addresses"]
+                    ]
+                else:
+                    try:
+                        addresses = getaddresses([header["value"]])
+                    except (ValueError, IndexError):
+                        addresses = []
                 for display, address in addresses:
                     if not address:
                         continue
@@ -311,6 +366,22 @@ def _parse_email(raw, filename):
                         record["senders"].append(item)
                     elif field in ("to", "cc", "bcc"):
                         record["recipients"].append(item)
+                if field in ("sender", "resent-sender") and len(addresses) > 1:
+                    warn(
+                        "multiple_sender_mailboxes",
+                        f"{field} must contain at most one mailbox.",
+                        header["location"],
+                    )
+        if (
+            len(lookup.get("from", [])) == 1
+            and len(record["senders"]) > 1
+            and not lookup.get("sender")
+        ):
+            warn(
+                "missing_sender_header",
+                "A From field with multiple mailboxes requires a Sender field.",
+                lookup["from"][0]["location"],
+            )
         dates = lookup.get("date", [])
         if not dates:
             warn("missing_date", "No Date header; no time is invented.", "header")

@@ -69,6 +69,23 @@ function timestamp(value) {
 function short(value, length = 16) {
   return value.length > length ? value.slice(0, length) + "..." : value;
 }
+function originatorText(record, field) {
+  const groups = (record.originator_groups || []).filter(
+    (group) => group.field === field,
+  );
+  if (!groups.length)
+    return field === "from"
+      ? record.senders.map((sender) => sender.address).join(", ")
+      : "";
+  return groups
+    .map((group) => {
+      const members = group.addresses.map((member) => member.address).join(", ");
+      return group.name === null
+        ? members
+        : `${group.name}:${members ? ` ${members}` : ""};`;
+    })
+    .join(", ");
+}
 function button(text, action, cls = "button secondary") {
   return el("button", { type: "button", class: cls, onclick: action }, text);
 }
@@ -263,7 +280,7 @@ function renderEvidence(data) {
       el(
         "td",
         {},
-        record.senders.map((s) => s.address).join(", ") || "Unknown sender",
+        originatorText(record, "from") || "Unknown sender",
         el(
           "span",
           { class: "cell-sub" },
@@ -410,7 +427,16 @@ async function showEmail(id, back = null) {
     content.append(
       detailList({
         "SHA-256": el("span", { class: "mono" }, record.sha256),
-        From: record.senders.map((s) => s.address).join(", ") || "Unknown",
+        From: originatorText(record, "from") || "Unknown",
+        ...(originatorText(record, "sender")
+          ? { Sender: originatorText(record, "sender") }
+          : {}),
+        ...(originatorText(record, "resent-from")
+          ? { "Resent-From": originatorText(record, "resent-from") }
+          : {}),
+        ...(originatorText(record, "resent-sender")
+          ? { "Resent-Sender": originatorText(record, "resent-sender") }
+          : {}),
         Recipients:
           record.recipients
             .map((s) => `${s.address} (${s.field})`)

@@ -24,6 +24,7 @@ def brief(record):
             "id",
             "subject",
             "senders",
+            "originator_groups",
             "recipients",
             "date_utc",
             "received_utc",
