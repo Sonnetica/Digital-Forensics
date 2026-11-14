@@ -1,0 +1,20 @@
+From: Maya Chen <maya@seabrook.example>
+To: Daniel Lee <daniel@seabrook.example>
+Subject: Q4 access review
+Message-ID: <access-review-1-20261002@seabrook.example>
+Date: Fri, 02 Oct 2026 11:05:00 +0800
+Received: from client.example ([198.51.100.31]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 11:05:18 +0800
+X-Originating-IP: [198.51.100.31]
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Hi Daniel,
+
+Could you check the Q4 access list before Tuesday's audit call? I have marked=
+ the two accounts that need owner confirmation.
+
+Working page: https://intranet.seabrook.example/access/q4
+
+Maya

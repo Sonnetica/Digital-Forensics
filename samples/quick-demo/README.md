@@ -1,5 +1,7 @@
 # Fictional email case
 
+For setup instructions and larger samples, see the [sample guide](../README.md).
+
 These 14 EML files form a fictional office email collection from 2 October 2026.
 Names, domains, IP addresses, and attachments are invented. The `.example`
 domains and documentation IP ranges do not identify real infrastructure.

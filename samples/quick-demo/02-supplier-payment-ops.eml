@@ -1,0 +1,51 @@
+From: Elise Hart <elise@northstar-payments.example>
+To: Sam Ong <sam@seabrook.example>
+Subject: October supplier payment update
+Message-ID: <supplier-ops-20261002@northstar-payments.example>
+Date: Fri, 02 Oct 2026 09:12:00 +0800
+Received: from client.example ([203.0.113.44]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 09:12:18 +0800
+X-Originating-IP: [203.0.113.44]
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+ boundary="etrace-demo-02-supplier-payment-ops-0"
+
+--etrace-demo-02-supplier-payment-ops-0
+Content-Type: multipart/alternative;
+ boundary="etrace-demo-02-supplier-payment-ops-1"
+
+--etrace-demo-02-supplier-payment-ops-1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hi Sam,
+
+I am sending the same supplier note to Operations so the purchase order and i=
+nvoice can be checked together. The review link is in the HTML version. Pleas=
+e hold any account change until Finance confirms it.
+
+Elise
+
+--etrace-demo-02-supplier-payment-ops-1
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<p>Hi Sam,</p><p>Please check the attached supplier note against the purchase=
+ order. <a href=3D"https://vendor-portal.example/review/oct-2026">Open the re=
+view page</a>. Hold any account change until Finance confirms it.</p><p>Elise=
+</p>
+
+--etrace-demo-02-supplier-payment-ops-1--
+
+--etrace-demo-02-supplier-payment-ops-0
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="remittance-note.txt"
+MIME-Version: 1.0
+
+Tm9ydGhzdGFyIE9mZmljZSBTdXBwbGllcwpSZWZlcmVuY2U6IE9DVC0yMDI2LTE3ClJlcXVlc3Rl
+ZCBjaGFuZ2U6IHJlbWl0dGFuY2UgaW5zdHJ1Y3Rpb25zClN0YXR1czogcGVuZGluZyBpbmRlcGVu
+ZGVudCB0ZWxlcGhvbmUgY29uZmlybWF0aW9uCg==
+
+--etrace-demo-02-supplier-payment-ops-0--

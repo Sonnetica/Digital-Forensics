@@ -17,13 +17,14 @@ htmlcov/
 .env
 .env.*
 *.eml
-!/demo email/*.eml
+!/samples/quick-demo/*.eml
 *.msg
 !/tests/fixtures/msg/*.msg
 *.mbox
 *.pst
 *.ost
 *.zip
+!/samples/*.zip
 *.exe
 *.whl
 *.tar.gz

@@ -1,0 +1,37 @@
+From: Billing Desk <billing@northstar-billing.example>
+To: Li Wei <liwei@seabrook.example>
+Subject: Fwd: October supplier payment update
+Message-ID: <supplier-finance-20261002@northstar-billing.example>
+Date: Fri, 02 Oct 2026 09:19:00 +0800
+Received: from client.example ([203.0.113.44]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 09:19:18 +0800
+X-Originating-IP: [203.0.113.44]
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+ boundary="etrace-demo-03-supplier-payment-finance-0"
+
+--etrace-demo-03-supplier-payment-finance-0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hello Li Wei,
+
+Forwarding the payment instruction sheet that reached our shared mailbox this=
+ morning. The sender name differs from the usual contact, so I have not appro=
+ved the change. Can you verify it with Northstar?
+
+Review copy: HTTPS://VENDOR-PORTAL.EXAMPLE:443/review/oct-2026
+
+Billing Desk
+
+--etrace-demo-03-supplier-payment-finance-0
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="remittance-note.txt"
+MIME-Version: 1.0
+
+Tm9ydGhzdGFyIE9mZmljZSBTdXBwbGllcwpSZWZlcmVuY2U6IE9DVC0yMDI2LTE3ClJlcXVlc3Rl
+ZCBjaGFuZ2U6IHJlbWl0dGFuY2UgaW5zdHJ1Y3Rpb25zClN0YXR1czogcGVuZGluZyBpbmRlcGVu
+ZGVudCB0ZWxlcGhvbmUgY29uZmlybWF0aW9uCg==
+
+--etrace-demo-03-supplier-payment-finance-0--

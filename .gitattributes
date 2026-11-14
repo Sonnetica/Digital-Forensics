@@ -4,3 +4,7 @@
 *.css text eol=lf
 *.html text eol=lf
 *.toml text eol=lf
+*.md text eol=lf
+*.eml -text
+*.msg -text
+*.zip -text

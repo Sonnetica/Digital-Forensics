@@ -1,0 +1,5 @@
+# Attachment libraries for build_realistic_corpus.py and build_complex_corpus.py.
+# With Python 3.13, these exact versions rebuild the packaged corpora byte for byte.
+reportlab==5.1.0
+openpyxl==3.1.5
+pillow==12.3.0

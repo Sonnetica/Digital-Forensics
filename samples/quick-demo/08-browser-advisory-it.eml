@@ -1,0 +1,20 @@
+From: Iris Rao <iris@seabrook.example>
+To: IT Service Desk <it@seabrook.example>
+Subject: October browser advisory
+Message-ID: <browser-it-20261002@seabrook.example>
+Date: Fri, 02 Oct 2026 13:10:00 +0800
+Received: from client.example ([198.51.100.41]) by mx.seabrook.example with
+ ESMTPS; Fri, 02 Oct 2026 13:10:18 +0800
+X-Originating-IP: [198.51.100.41]
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Team,
+
+The vendor advisory is relevant to the browsers on the training PCs. Please c=
+heck the affected versions before scheduling an update.
+
+Advisory: https://security.seabrook.example/advisory/browser-oct-2026
+
+Iris

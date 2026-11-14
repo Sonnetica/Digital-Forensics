@@ -1,557 +1,83 @@
-# E-TRACE
+# E-Trace
 
-Email Timeline Reconstruction and Artifact Correlation Engine.
+E-Trace is a local email investigation prototype. It imports individual EML and MSG files, preserves their bytes and SHA-256 hashes, and shows replies, reused URLs, shared attachments and possible coordination with links back to the original messages. It does not require an email account, API key or cloud service.
 
-## Installation
+## Get started from GitHub
 
-Use Python 3.12 or later. From the repository root:
-
-```powershell
-python -m venv E:\etrace-env
-E:\etrace-env\Scripts\python -m pip install .
-```
-
-On Linux or macOS, use `python3 -m venv ~/etrace-env` and
-`~/etrace-env/bin/python -m pip install .`. Activate the environment or use the
-full path to its `etrace` executable for the commands below.
-
-For the exact submitted dependency set, install `requirements.txt` first and
-then install the project with `python -m pip install --no-deps .`. The application
-has no cloud services, API keys or external JavaScript/CDN requirements.
-
-## Create and acquire a case
-
-Keep case databases, real input evidence, and exports outside this repository.
-The `demo email/` folder contains 14 fictional EML files for a local trial;
-its [scenario guide](demo%20email/README.md) explains the expected relationships.
+Install **Python 3.12 or later** and Git. In Windows PowerShell, run:
 
 ```powershell
-etrace init E:\cases\incident.db --name "Email incident"
-etrace ingest E:\cases\incident.db E:\evidence
-etrace info E:\cases\incident.db
-etrace analyze E:\cases\incident.db --window-seconds 3600
-etrace verify E:\cases\incident.db
-etrace export E:\cases\incident.db --output E:\cases\incident.json
-etrace export E:\cases\incident.db --bundle --output E:\cases\incident-bundle.zip
+git clone https://github.com/Sonnetica/Digital-Forensics.git
+cd Digital-Forensics
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m etrace init .\work\demo.db --name "Demo case"
+.\.venv\Scripts\python.exe -m etrace ingest .\work\demo.db .\samples\quick-demo
+.\.venv\Scripts\python.exe -m etrace analyze .\work\demo.db
+.\.venv\Scripts\python.exe -m etrace serve .\work\demo.db
 ```
 
-To try the bundled sample emails with a newly created case, ingest
-`".\demo email"` in place of `E:\evidence` in the example above.
+Open <http://127.0.0.1:8765> in a browser. Use **Timeline**, **Relationship graph**, **Evidence** and **Diagnostics** to inspect the result. Stop the server with `Ctrl+C`. On later visits, run only the `serve` command for the existing case. Case creation refuses to overwrite an existing database.
 
-Ingestion accepts individual `.eml` and `.msg` files or recursively scans a
-directory. It reads the source, stores its exact bytes and SHA-256 in SQLite,
-and records each source location. Identical files share one evidence identity;
-different files with the same Message-ID remain separate evidence items.
-Files larger than 25 MiB, empty files, unsupported formats, and exceeded parsing
-limits are rejected. Per-file errors do not discard successful acquisitions.
-An ingest command returns a nonzero exit status when any file fails.
+If the repository was downloaded as a ZIP from GitHub, extract it and run the commands from the extracted `Digital-Forensics` folder, starting at `python -m venv .venv`.
 
-## Case handoff bundle
+On macOS or Linux, use `python3 -m venv .venv`, then replace `.\.venv\Scripts\python.exe` with `./.venv/bin/python` in the commands above. Use forward slashes in paths.
 
-The case database already holds the original bytes, parsed records, every run and
-its settings, and the audit trail. A bundle packages the same material as plain
-files so another investigator can check it with standard tools and reproduce the
-analysis without access to the original database:
+## Sample email collections
 
-```powershell
-etrace export E:\cases\incident.db --bundle --output E:\handoff\incident.zip
-etrace import-bundle E:\handoff\incident.zip --case E:\cases\incident-rebuilt.db
-```
-
-The zip contains `sources/` (each original EML/MSG named by its SHA-256),
-`case-export.json` (the JSON export, including the audit trail and integrity
-check), `manifest.json` (hashes, sizes, every acquisition name and time, runs and
-their findings digests), `SHA256SUMS` and a short `README.txt`. On Linux or macOS
-`sha256sum -c SHA256SUMS` checks every file; on Windows compare
-`Get-FileHash -Algorithm SHA256` output with `SHA256SUMS`. **Export bundle** in the
-interface downloads the same zip.
-
-`import-bundle` refuses a bundle with any altered, missing, unlisted or oddly
-named file, before creating the case. It also checks that the manifest, JSON
-export and acquisition audit agree. It then recomputes the original audit hash
-chain, ingests every acquisition under its original name, records an
-`import_bundle` entry (bundle SHA-256 and original audit head) in the new case's
-audit trail, and re-runs each saved analysis with its saved settings on the
-evidence that run used. The report states per run whether the findings (copy
-groups, relationships, diagnostics and statistics) match. Run identifiers also
-match when the Python and extract-msg versions are the same; parsed records note
-those versions, so another machine can give a different identifier with identical
-findings. Runs made with other rule or parser versions are reported as not
-comparable. Matching runs are saved in their original acquisition order, even
-when later files made a run stale. The command exits with status 1 when the
-original audit chain or a comparable run does not reproduce.
-The rebuilt case has its own acquisition times and audit trail; the original
-trail stays in `case-export.json`.
-
-## Investigator interface
-
-```powershell
-etrace serve E:\cases\incident.db --port 8765
-```
-
-Open `http://127.0.0.1:8765` in a current browser. Stop the server with Ctrl+C.
-The interface binds only to this computer's loopback address and does not need
-an internet connection after installation. It is a local, single-investigator
-application, not a hosted service with user accounts.
-
-1. Select **Import evidence**, choose EML/MSG files, then **Acquire evidence**.
-   Uploads allow 100 files per batch, 25 MiB each, and a 100 MiB request limit.
-   Every rejected file is listed; valid files in the same batch are retained.
-2. Select **Run analysis**. Set the coordination window, minimum number of
-   artifact categories, timestamp source and routine-background test. Defaults are
-   3,600 seconds, two categories, Date, at least ten occurrences outside a pair's
-   window at a 5:1 outside-to-inside ratio. The investigated organisation's own
-   domain is left empty: enter it, or select **Use suggested domain** after
-   checking that the suggestion is your organisation and not a supplier. Further
-   URL domains can be excluded from coordination. The case is verified before
-   analysis.
-3. Use **Evidence** to search subjects, addresses, body previews, URLs and hashes.
-   Select a subject to inspect raw headers, timestamp observations, artifacts,
-   acquisition locations and a safe text preview. **Download preserved source**
-   returns the original bytes as an attachment.
-4. Use **Timeline** to filter by relationship type, UTC date range and search
-   term. The date filter selects relationships overlapping the requested range;
-   unknown-time relationships are excluded when a date filter is active.
-   Select **Inspect evidence** to see the rule, exact observations, participating
-   source messages and contextual counter-evidence.
-5. Use **Relationship graph** to explore the same filters. Circles are messages;
-   diamonds are relationships. Reply arrows point from the candidate parent
-   through the relationship to the child. Pan, zoom, drag nodes or select a node
-   to inspect it. Keyboard users can Tab to nodes and press Enter. The graph
-    hides coordination clusters by default and limits its display to 180 nodes;
-    use **Show coordination clusters** to include them. The timeline and export remain
-   complete, including groups too large to fit in the graph.
- 6. **Case integrity** checks hashes and the audit trail and lists copy and
-    relationship diagnostics. **Export case** downloads structured JSON containing all
-   evidence metadata, every analysis run, provenance and the audit chain.
-
-The analysis selector reopens older runs. The Relationships card and the notice
-follow the run being viewed; an older run shows its own count next to the latest
-run's. A visible notice marks the latest run out of date when evidence
-was added after it, or when it was made with an older rule or parser version (or
-one it did not record), or when the parsed evidence no longer matches the record
-digest saved with the run, and names the reason. An analysis of an empty case is
-current; `etrace info` reports the same
-`latest_run` status. Older runs are never altered and stay available for review. Select **Apply** after changing filters; **Reset** clears them.
-
-Browser uploads retain filenames as acquisition labels; use CLI ingestion when
-the original full source path should be recorded. Evidence HTML is never
-inserted into the page, links are not opened automatically, and uploaded
-attachments are neither executed nor written to their claimed filenames.
-
-## Correlation rules
-
-| Rule | Trigger | Interpretation |
+| Location | Purpose | Size |
 | --- | --- | --- |
-| Attachment reuse | Same SHA-256 in at least two distinct logical messages | Equal decoded bytes; direction is not inferred |
-| URL reuse | Same conservatively normalized HTTP(S) URL in at least two distinct logical messages | Shared URL; no network lookup |
-| Reply | Each In-Reply-To identifier resolves to one unambiguous copy group; otherwise the last References identifier when In-Reply-To is absent | Header-linked relationship; References fallback and multi-parent In-Reply-To are explicitly qualified |
-| Inline image reuse | Same inline image SHA-256 (for example a signature logo or embedded QR code) in at least two distinct logical messages | Informational review aid; never a coordination signal and not scored by the evaluator |
-| Possible coordination | A pair of distinct logical messages shares enough non-routine categories among attachment hash, URL, normalized subject and claimed origin IP within an inclusive time window | Reviewable cluster of supported pairs; excludes resolved reply components; bulk-mail headers are labelled |
+| [`samples/quick-demo/`](samples/quick-demo/README.md) | Ready-to-run fictional office email walkthrough | 14 EML files |
+| [`samples/realistic-41.zip`](samples/realistic-41.zip) | Fictional freight company mail with an invoice phishing scenario and ordinary messages | 41 EML files per labelled set |
+| [`samples/complex-355.zip`](samples/complex-355.zip) | Larger overlapping mailboxes with several attack scenarios and routine traffic | 355 labelled files plus one duplicate acquisition file per set, representing 174 logical messages |
 
-Each result includes rule version, all parameters, source SHA-256 identities,
-exact matched values, header/MIME locations, supporting observations and
-separate contextual limitations. Ambiguous parents and missing sources appear
-as diagnostics; provisional copy groups, reply cycles and time reversals remain visible.
-RFC 5322 allows In-Reply-To to list several parents. Each resolvable parent then
-receives its own edge, marked `multiple_in_reply_to` in the edge context and in
-the run diagnostics, so no single edge is presented as the only parent.
+The two archives must be extracted before ingestion. They contain `conformance/` and `intent/` copies of the same mail, answer keys and older evaluation results. Ingest **one** email folder, not the archive root. Their answer keys were written for an earlier rule definition, so they are useful for demonstration but are not the source of current accuracy figures. [The sample guide](samples/README.md) gives exact extraction and run commands.
 
-Transport-header variants are grouped as copies when their single Message-ID,
-From identity, Date, subject, To/Cc recipients and reply headers agree, plus either the
-decoded content digest matches or the only differences are recognised
-link-protection rewrites. For that comparison the parser records a fingerprint of
-the full decoded content of every part, including HTML markup, attributes,
-comments, hidden form fields, and attachment bytes, filenames and dispositions,
-with each URL masked and
-whitespace collapsed, together with the URLs in order. Two files match only when
-the fingerprints are identical and their URLs decode to the same destinations in
-the same order. Any other difference, such as a changed account number in the
-visible text, a hidden HTML field or a renamed attachment with the same bytes,
-keeps the files apart, and a reply to their
-shared Message-ID stays an ambiguous parent. A gateway that changes markup as
-well as links (for example by adding a warning banner) also leaves its copies
-ambiguous.
+The separate `evaluation/` generators create the 14-, 77- and 269-message **controlled test tiers** used for rule-conformance measurements. Those are distinct from the three demonstration collections above. [Rules and evaluation details](docs/rules-and-evaluation.md) explain the labels and their limits.
 
-RFC 6854 permits named groups in From, Sender, Resent-From and Resent-Sender,
-including an empty group with no mailbox. E-TRACE preserves the group labels and
-members separately from the original header. From members remain claimed authors;
-Sender is shown separately as the claimed transmitting agent. An empty From group
-is displayed without inventing an address or domain. Copies using named From
-groups must agree on the group structure and any Sender field. For an empty From
-group, the decoded content digest must also match before copies are grouped.
+## Use E-Trace with your own files
 
-Recognised wrappers are HTTPS links on the provider's own domains only:
-Microsoft Defender Safe Links on `safelinks.protection.outlook.com` and
-`safelinks.protection.office365.us` (and their subdomains), and Proofpoint URL
-Defense v2 (`urldefense.proofpoint.com`) and v3 (`urldefense.com`). A look-alike
-host such as `login.safelinks.attacker.example` is never trusted.
-`--trusted-wrapper-host` adds a host that uses the Safe Links `url=` format, for
-example a test corpus or another gateway; it is recorded with the run and should
-normally stay empty. Unwrapping is used only for this comparison; every observed
-URL is preserved exactly. Groups whose raw content differs are marked
-`copy_content_variation`. Every raw file and SHA-256 remains separate evidence.
-Inline MIME resources are recorded as `inline_resource_sha256`, reported as
-inline image reuse, and never used as coordination signals.
-
-Two rules keep routine traffic out of coordination without hiding focused or
-recurring campaigns:
-
-- Links to the investigated organisation's own domain are ignored once the
-  investigator confirms that domain with `--organisation-domain` (repeatable) or
-  in the analysis form. E-TRACE suggests a domain only when it is, without a tie,
-  both the most common recipient domain and the most common sender domain,
-  receives at least half of all recipient addresses and sends at least a quarter
-  of the messages. It never applies the suggestion on its own, and the form does
-  not pre-fill it: who the organisation is depends on how the evidence was
-  collected (mail to or from a supplier can otherwise make the supplier look
-  internal). An unconfirmed suggestion is reported as an
-  `organisation_domain_not_confirmed` diagnostic. `--exclude-url-domain` ignores
-  further domains, for example a second company domain.
-- A shared value is routine background for a given pair when at least
-  `--background-min-outside` occurrences (default 10) fall outside the pair's
-  window extended by one window each side, and they outnumber the occurrences
-  inside it by `--background-ratio` (default 5). A burst, including each wave of a
-  campaign repeated over several days, keeps its signal; a link that appears all
-  month does not.
-
-Every link excluded by domain is listed as a `coordination_signal_suppressed`
-diagnostic, and every value treated as background is listed as a
-`coordination_background_signal` diagnostic with the number of pair comparisons
-it affected and its source files. Neither rule changes URL, attachment or
-subject observations or the reuse events. A cluster containing files with
-List-Unsubscribe, List-Id, Auto-Submitted or Precedence bulk/list/junk headers is
-labelled `bulk_mail_indicators` as a review-priority hint. Bulk mail sent on a
-single day without those headers, such as payslip notices or an authorised
-phishing simulation, is indistinguishable from a burst campaign by these rules and
-remains in the results.
-Overlapping qualifying pairs are shown as one cluster with each pair's signals
-and source observations retained. Cluster membership alone does not imply a
-direct relationship between every member.
-
-Subject matching removes leading Re/Fw/Fwd prefixes, folds case and collapses
-whitespace. URL matching lowercases scheme/host, converts international hostnames
-to IDNA, removes default ports and normalizes an empty path to `/`. Query order,
-values, percent encoding, path case and fragments are preserved. IP matching uses
-one X-Originating-IP claim or the `from` clause of the oldest Received header;
-shared relay addresses are not automatically treated as senders.
-
-Use `--minimum-signals 3` for a stricter coordination hypothesis,
-`--background-min-outside 10 --background-ratio 5` to tune the routine-background
-test, `--exclude-url-domain company.example` to ignore one more domain and its
-subdomains for coordination, or `--timestamp-source received` to use
-the top Received header instead of Date.
-There is no silent time-source fallback. Parameters are saved with every run.
-Unknown times exclude messages only from temporal coordination. Repeating a run
-with the same parsed evidence and parameters produces the same identifier.
-Each source record includes its Python and, for MSG, extract-msg parser version;
-changing parser runtimes can change extraction and therefore run identifiers. New evidence
-requires a new analysis; old runs remain available in the export.
-For cases ingested with an older parser, analysis and the investigator view
-reparse preserved raw bytes in memory. The originally stored parse and its audit
-hash remain unchanged and are included in the case export. For those items the
-export also contains the derived `analysis_record` used by analysis, and every
-run lists the `parser_versions` of the records it analysed.
-
-Resource limits abort analysis without saving partial results. Defaults allow
-250,000 distinct coordination candidates, 2,000,000 candidate comparisons and
-50,000 events. CLI options `--max-candidates` and `--max-events` change those
-limits; the comparison limit is eight times the candidate limit.
-
-## Reproducible evaluation
-
-The primary evaluation question is whether E-TRACE correctly reconstructs the
-four explicitly defined relationships in the rule table above, with traceable
-supporting evidence. Use the simple, medium and complex controlled tiers for
-rule-conformance metrics, and the public/mixed workloads for processing coverage
-and scoped planted-relationship recovery. The CMU adjacency benchmark and the
-intent-labelled challenge ask broader questions and belong in a separate
-limitations analysis. Do not pool their scores with the primary rule-conformance
-scores or describe rule conformance as proven campaign attribution.
-
-Older packaged corpora were labelled for rule version 1.0.0, which counted inline
-logos and routine links in coordination and treated copies as separate messages.
-Rule version 1.2.0 replaced the share-based common-artifact filter with the
-organisation-domain and routine-background rules; 1.3.0 made the organisation
-domain an investigator-confirmed setting and limited link-wrapper recognition to
-provider domains; 1.4.0 required the full decoded content, markup included, to
-match before files are grouped as copies; 1.4.1 added attachment filenames and
-dispositions to that comparison; 1.4.2 adds RFC 6854 From-group identity to copy
-matching. Precision and recall from older labels
-are not a valid benchmark for the current rules. The evaluator reports
-`rule_definition_compatible`; generate fresh controlled tiers for version 1.4.2 and
-review any external corpus labels against the new rule table. Corpora that use a
-fictional link-protection host need `--trusted-wrapper-host` to reproduce copy
-grouping.
-
-The evaluator scores logical messages. Labels and predictions are mapped onto the
-run's copy groups, pairs between copies of one message are dropped, and the
-result lists each copy group by filename. `file_level_per_rule` repeats the
-scoring per preserved file for comparison. If grouping maps a positive and a
-negative label onto the same pair, the labels contradict each other and the
-evaluator stops with exit status 2, naming the conflicting files, instead of
-scoring. The options `--background-min-outside`, `--background-ratio`,
-`--organisation-domain`, `--exclude-url-domain` and `--trusted-wrapper-host` are
-available for
-separately reported sensitivity experiments. Fix parameters before a final run and
-report any tuning separately; the defaults were chosen on fictional corpora and
-have not been validated on real mailbox collections.
-
-After installing the package, run these commands from the repository root. The
-generator and evaluator refuse to write generated data inside the repository.
+Start a fresh case and ingest an exported `.eml` or `.msg` file, or a directory containing those files:
 
 ```powershell
-python evaluation/generate.py --output E:\evaluation\simple --tier simple --seed 47
-python evaluation/evaluate.py E:\evaluation\simple --output E:\evaluation\simple-results.json
-python evaluation/generate.py --output E:\evaluation\medium --tier medium --seed 47
-python evaluation/evaluate.py E:\evaluation\medium --output E:\evaluation\medium-results.json
-python evaluation/generate.py --output E:\evaluation\complex --tier complex --seed 47
-python evaluation/evaluate.py E:\evaluation\complex --output E:\evaluation\complex-results.json
+.\.venv\Scripts\python.exe -m etrace init .\work\my-case.db --name "My case"
+.\.venv\Scripts\python.exe -m etrace ingest .\work\my-case.db C:\path\to\exported-mail
+.\.venv\Scripts\python.exe -m etrace analyze .\work\my-case.db
+.\.venv\Scripts\python.exe -m etrace verify .\work\my-case.db
+.\.venv\Scripts\python.exe -m etrace serve .\work\my-case.db
 ```
 
-Use the Python executable from your installed environment. Output directories
-must be empty and result files must not already exist. `--noise 1000` adds a
-larger unrelated-message workload. Change `--seed` for another deterministic
-corpus. The generator creates original EML bytes, a SHA-256 manifest and ground
-truth specified from the planted scenarios, without invoking the correlation
-engine. It includes artifact reuse, normal reply chains, one-artifact controls,
-window-boundary cases, uncertain dates, duplicate Message-IDs, reply cycles,
-duplicate acquisitions and URL distinctions according to the selected tier.
-These three tiers check implementation conformance to specified rules. Changing
-the random seed changes message values, not the scenario structures, and is not
-an independent validation of the underlying forensic hypotheses.
+Replace `C:\path\to\exported-mail` with your actual folder. E-Trace recursively reads EML and MSG files from a directory. Keep real evidence and shared case databases outside the clone. The local `work/` folder is ignored by Git and is intended only for trials.
 
-The evaluator verifies corpus hashes before parsing. It reports TP, FP, FN, TN,
-precision, recall, F1, false positive rate and false negative rate per rule and
-as micro totals. Artifact groups expand to unordered message pairs; reply pairs
-are directed parent-to-child pairs. The negative universe is every distinct
-source pair for that rule, rather than only pairs generated by the engine.
-Undefined metrics are JSON `null`. Error lists name the exact message pairs.
-For partially labelled data, that universe is restricted to explicitly labelled
-pairs and declared complete subsets. Unlabelled background relationships are
-never treated as negatives. Each rule reports its assessed candidate count and
-unassessed prediction count; micro metrics cover only the assessed scope.
-
-The comparison baseline labels any reused URL or attachment within the same
-window as possible coordination and does not exclude reply threads. This is an
-internal ablation with the same parser, not a comparison with a commercial tool.
-Recorded parse/correlation timings include `tracemalloc` overhead; peak memory
-is traced Python allocation, not total process memory. Synthetic results measure
-controlled rule behavior. They do not establish real-world detection accuracy,
-malicious intent, or human investigation time savings.
-
-The evaluator exits 0 for no false positives/negatives, 1 for measured mismatches,
-and 2 for invalid input. It accepts the same window, minimum-signal and time-source
-options for separate parameter experiments; the result states whether they match
-the fixed reference parameters. Do not overwrite reference results with tuning
-results. To inspect a corpus visually, ingest its directory into a new case and
-open the investigator interface.
-On entirely unlabelled input, exit status 0 means processing completed; its null
-accuracy metrics do not constitute a passed detection benchmark.
-
-### Public email and mixed workloads
-
-The following commands download three pinned February 2003 archives from the
-[Apache SpamAssassin public corpus](https://spamassassin.apache.org/old/publiccorpus/readme.html).
-They contain 3,250 unique messages in total. Archive SHA-256 values are pinned
-in `evaluation/corpora.py`. Downloads and generated evidence stay outside Git.
-The script reads regular archive members without extracting archive paths or
-executing the included `cmds` files. A mismatched cached/downloaded archive fails
-verification; it is never silently accepted.
+To hand off a case, export JSON or a bundle. The bundle contains the original files and a manifest, and the importer checks its internal consistency:
 
 ```powershell
-python evaluation/corpora.py --cache E:\evaluation\downloads --output E:\evaluation\public-1000 --count 1000 --seed 47
-python evaluation/evaluate.py E:\evaluation\public-1000 --output E:\evaluation\public-results.json
-python evaluation/mix.py E:\evaluation\public-1000 --output E:\evaluation\mixed-1000 --seed 97
-python evaluation/evaluate.py E:\evaluation\mixed-1000 --output E:\evaluation\mixed-results.json
+.\.venv\Scripts\python.exe -m etrace export .\work\demo.db --output .\work\demo.json
+.\.venv\Scripts\python.exe -m etrace export .\work\demo.db --bundle --output .\work\demo-bundle.zip
+.\.venv\Scripts\python.exe -m etrace import-bundle .\work\demo-bundle.zip --case .\work\demo-rebuilt.db
 ```
 
-Selection is a seeded contiguous window of messages sorted by their aware Date
-and SHA-256, with unknown dates last. It is independent of E-TRACE output and
-retains temporal neighbours, but does not guarantee complete conversations.
-Use `--count 3250` for the complete pinned population. Evidence gets a `.eml`
-filename; its bytes remain identical to the archive member. The manifest records
-original member names, archive hashes, selection settings, date coverage and
-upstream modifications. This historical collection contains obfuscated addresses
-and other edits described by Apache; it is not representative of every modern
-email environment. Its spam/ham classes are not E-TRACE relationship labels.
+The [user manual](docs/user-manual.md) explains the settings, web interface, exports, verification and common errors. Equal hashes and rule matches are observations for an investigator to review. They do not establish sender identity or malicious intent by themselves.
 
-The mixed dataset adds eight controlled messages within the observed public date
-range. Real messages are unchanged. All pairs within the planted subset are
-labelled; public-public and public-planted pairs remain unknown. The planted
-artifacts use distinctive reserved-domain values, so recovering them establishes
-survival in a real workload, not resistance to all realistic confounders. Report
-their recovery separately from public-mail candidate volume and extraction
-warnings. `peak_traced_python_bytes` covers parsing and correlation only, not
-pairwise scoring, downloads, disk use or total process memory.
+## Run the tests
 
-Each evaluation JSON includes a `review_queue`: up to 20 uniformly sampled
-unassessed predictions per rule with fixed seed 47. Make a copy outside Git.
-Review the named original messages independently, then set each completed entry's
-`label` to `positive` or `negative`, and record `reviewer` and `rationale` with
-the specific header, URL or decoded attachment evidence. Leave uncertain cases
-`unassessed`. For coordination, assess observable support for the rule; do not
-interpret that label as proof of a shared plan or malicious intent.
+After installation, from the repository root:
 
 ```powershell
-python evaluation/evaluate.py E:\evaluation\mixed-1000 --reviews E:\evaluation\reviewed-results.json --output E:\evaluation\assessed-results.json
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Reviews must match the exact analysis run and cannot override the fixed planted
-labels. This is a review aid, not an automatically completed human study. A
-sample of predicted pairs cannot estimate global recall. Report the number of
-reviewed and uncertain cases, the selection procedure, assessor agreement and
-sampling limitations. Do not describe reviewed-sample precision as whole-corpus
-accuracy. Have a second group member assess the same sample before resolving
-disagreements; do not replace independent assessment with the engine's explanation.
+The automated tests create their own temporary EML data and use the MSG fixtures in `tests/fixtures/msg/`. Generated evaluation corpora are created separately and must be written outside the repository. See [rules and evaluation](docs/rules-and-evaluation.md) for reproduction commands. `requirements.txt` pins the submitted runtime dependency set. The package definition and command entry point are in `pyproject.toml`.
 
-### Independent threading labels
+## Repository layout
 
-[Minkov, Cohen and Ng's CMU release](https://www.cs.cmu.edu/~einat/datasets.html)
-provides published queries and correct adjacent-message answers for Farmer and
-Germany mailboxes. The [SIGIR 2006 paper](https://www.cs.cmu.edu/~einat/sigir-06.pdf),
-section 5.4, identifies parents using subject and timestamp. This is an external
-related-message retrieval task, not an all-rule E-TRACE forensic benchmark.
-
-```powershell
-python evaluation/cmu_threads.py --cache E:\evaluation\downloads --output E:\evaluation\cmu-test --split test
-```
-
-The script evaluates all published test queries against their complete mailbox
-subsets. It maps directed reply edges to undirected adjacency for this one task.
-It preserves the pinned source archives and writes separately hashed derivatives
-with the release's leading blank lines removed. It never invents missing headers.
-Results include every query, expected answer, original/derived hash and header
-coverage count. The supplied 5,293 files lack Message-ID, In-Reply-To and References;
-E-TRACE consequently recovers none of the 161 test query-answer relationships
-(152 queries). Precision is undefined because it proposes no reply edges.
-Keep this result: header-linked reconstruction cannot recover conversations when
-those headers are unavailable. This does not implement or reproduce the paper's
-ranking algorithm and does not evaluate URL, attachment or campaign detection.
-
-### Challenge cases and claim boundaries
-
-```powershell
-python evaluation/generate.py --output E:\evaluation\challenge --tier challenge --seed 47
-python evaluation/evaluate.py E:\evaluation\challenge --output E:\evaluation\challenge-results.json
-```
-
-This 15-message tier deliberately changes the coordination target: positive labels
-represent membership in a declared planned distribution, independently of whether
-the heuristic fires. It includes independent sharing of a common bulletin, planned
-distribution through reply chains, personalised URLs/attachments, delayed sending,
-and a straightforward positive control. The other three rules still use observable
-relationship labels. These are constructed counterexamples, not estimated real-world
-error rates. At default settings, coordination has 3 TP, 3 FP and 9 FN against this
-intent target (precision 0.50, recall 0.25). Exit status 1 is expected. This exposes
-the gap between the heuristic and a stronger campaign claim; do not hide these
-cases or tune the defaults against them and then call them a held-out evaluation.
-
-For a separately reported sensitivity experiment, repeat the evaluator with
-`--window-seconds 7200` or `--minimum-signals 3` into distinct result files. Keep
-the reference labels fixed. Compare candidate volume and labelled errors, and
-explain the tradeoff without treating unassessed public matches as false positives.
-
-The use of controlled evidence follows the general testing approach described by
-[NIST CFReDS](https://cfreds-archive.nist.gov/): documented inputs allow expected
-tool behaviour to be checked. E-TRACE is not NIST certified, and these scenarios
-are not NIST datasets. No single dataset here supplies authenticated real-incident
-ground truth for all four rules. Observable reuse, header-linked replies and
-possible-coordination hypotheses must remain distinct in any presentation.
-
-For additional acquisition validation, the group can record send/reply/forward
-and independent-reuse actions through actual mail clients in a controlled mailbox,
-export EML/MSG, and retain a separate action log before running E-TRACE. Record
-client versions, export method, original hashes and missing messages. Such a lab
-remains a simulation. No client study or human time-saving result is implied by
-the automated evaluations above.
-
-## Code map and packaging
-
-| Location | Responsibility |
+| Folder | Contents |
 | --- | --- |
-| `src/etrace/parser.py`, `normalize.py` | EML/MSG extraction and conservative normalization |
-| `src/etrace/case.py` | SQLite evidence, acquisition history, saved runs and verification |
-| `src/etrace/bundle.py` | Portable handoff bundle export, verification, rebuild and reproduction |
-| `src/etrace/correlate.py`, `model.py` | Indexed deterministic rules, parameters and provenance |
-| `src/etrace/cli.py` | Case acquisition, analysis, export, bundle import and server commands |
-| `src/etrace/web.py`, `templates/`, `static/` | Local investigator API and browser interface |
-| `evaluation/` | Controlled/challenge generator, scoped evaluator, public-corpus preparation, mixing and external threading assessment |
-| `tests/` | Regression tests for parsing (including real Outlook MSG fixtures in `tests/fixtures/msg/`, BSD-licensed from msg_parser), copy grouping, rules, filters, evaluation scoring, case export, bundles and the web API |
+| `src/etrace/` | Application, CLI, parser, correlation rules, case storage and local web interface |
+| `samples/` | Fictional email collections for trying the interface |
+| `tests/` | Automated regression tests and MSG test fixtures |
+| `evaluation/` | Corpus generators, evaluator and public-data preparation scripts |
+| `docs/` | Detailed user manual, rules and evaluation notes |
+| `archive/patches/` | Historical development patches, not needed to run E-Trace |
 
-Run the regression tests from the repository root with
-`python -m unittest discover -s tests` and lint with `ruff check src tests evaluation`.
-
-The `pyproject.toml` builds an installable Python wheel. Build from a source copy
-outside the repository with `python -m build --wheel --outdir E:\packages` after
-installing the `build` package. A wheel installs with `python -m pip install
-<wheel-path>` and provides the same `etrace` command. Runtime dependencies are
-listed in `requirements.txt`; build tools and development tests are not runtime
-dependencies. Source archives contain the application, evaluator and manual,
-not generated evidence, databases, exports, build products, reports or slides.
-
-## Troubleshooting
-
-- **Command not found:** use the full path to the environment's `etrace`
-  executable, or run `python -m etrace` with that environment's Python.
-- **Port already in use:** stop the other local instance or choose another
-  `--port`. Keep the browser URL on the port shown in the server console.
-- **Request rejected after restarting the server:** reload the browser page to
-  renew its local session and request token.
-- **Case already exists:** choose a new case path or open the existing case.
-  Case creation and CLI exports never overwrite existing files.
-- **Integrity mismatch:** retain the affected database and original evidence,
-  compare against your separately held export, and acquire into a new case for
-  further analysis. Do not edit SQLite records to hide a mismatch.
-- **Analysis limit exceeded:** use a smaller, justified evidence selection or
-  raise the explicit CLI limits. The failed run is not saved as a complete result.
-
-Parsing and relationship semantics are informed by
-[RFC 5322](https://www.rfc-editor.org/rfc/rfc5322.html) and its
-[RFC 6854](https://www.rfc-editor.org/rfc/rfc6854.html) originator-field update, URL normalization by
-[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html), and implementation APIs by
-the [Python email documentation](https://docs.python.org/3/library/email.parser.html)
-and [Flask security documentation](https://flask.palletsprojects.com/en/stable/web-security/).
-
-## Evidence interpretation
-
-Date and Received timestamps retain their raw values and are normalized to UTC
-only when an offset is available. Missing or ambiguous dates remain unknown.
-Header values, including sender identities, IP addresses and authentication
-results, are observations and are not independently authenticated.
-
-Attachment hashes cover transfer-decoded bytes, not their encoded MIME text.
-Attached emails and embedded Outlook items remain in the original source and
-are not flattened into the outer message. URL extraction covers text bodies,
-HTML links and resource attributes; it does not inspect attachment contents,
-follow redirects, fetch remote resources or execute email HTML.
-
-MSG files are read with extract-msg (installed with E-TRACE). The HTML body
-property is binary (MS-OXPROPS `PidTagHtml`); it is decoded with the message's
-`PidTagInternetCodepage`, then an HTML `<meta charset>`, then UTF-8, and finally
-Windows-1252 with replacement and a `charset_fallback` warning. The codec used and
-its basis are recorded with the part. When no HTML property is stored, Outlook
-often keeps the HTML inside the compressed RTF body; E-TRACE then reconstructs it
-(RTF de-encapsulation) so link targets are searched, labels the part as derived
-from `PidTagRtfCompressed` and adds a `msg_body_from_rtf` observation. Plain RTF
-without encapsulated HTML or text, RTF bodies over 5 MiB, malformed RTF and
-encrypted bodies remain in the source with a limitation warning. Unsupported text MIME
-types, nested email attachments, malformed encodings and timestamp issues are
-visible in the evidence record. Plain-text URL punctuation is preserved because
-it may be part of a valid path; this conservative choice can miss a reuse match
-when a sentence ends with punctuation attached to its URL. HTML attributes
-provide more precise URL boundaries. Limits are 1,000 MIME parts/MSG attachments,
-30 MIME nesting levels, 2,000,000 total decoded text characters and 20,000
-artifact observations per message. Evidence exceeding a limit is rejected.
-
-PST/OST archives, mailbox acquisition, deleted-message recovery, attachment
-malware scanning, DNS lookups and independent SPF/DKIM verification are outside
-the implemented scope. Export individual EML/MSG files from your acquisition
-tool before ingestion. Sharing a URL or attachment does not establish a phishing
-campaign, a transfer path or the identity of a sender.
-
-`verify` checks source hashes, parsed-record hashes, the artifact index and the
-audit chain. This detects internal inconsistencies, but is not a digital
-signature or independent proof of custody. Retain the exported audit head in a
-separate trusted location. Source originals remain necessary for independent
-verification. Exports contain sensitive evidence metadata and body previews.
+Local environments, case databases, generated data, reports and build products are excluded from Git by `.gitignore`.
