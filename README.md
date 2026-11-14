@@ -67,7 +67,8 @@ their findings digests), `SHA256SUMS` and a short `README.txt`. On Linux or macO
 interface downloads the same zip.
 
 `import-bundle` refuses a bundle with any altered, missing, unlisted or oddly
-named file, before creating the case. It then recomputes the original audit hash
+named file, before creating the case. It also checks that the manifest, JSON
+export and acquisition audit agree. It then recomputes the original audit hash
 chain, ingests every acquisition under its original name, records an
 `import_bundle` entry (bundle SHA-256 and original audit head) in the new case's
 audit trail, and re-runs each saved analysis with its saved settings on the
@@ -76,8 +77,9 @@ groups, relationships, diagnostics and statistics) match. Run identifiers also
 match when the Python and extract-msg versions are the same; parsed records note
 those versions, so another machine can give a different identifier with identical
 findings. Runs made with other rule or parser versions are reported as not
-comparable. The latest run is saved in the rebuilt case. The command exits with
-status 1 when the original audit chain or a comparable run does not reproduce.
+comparable. Matching runs are saved in their original acquisition order, even
+when later files made a run stale. The command exits with status 1 when the
+original audit chain or a comparable run does not reproduce.
 The rebuilt case has its own acquisition times and audit trail; the original
 trail stays in `case-export.json`.
 

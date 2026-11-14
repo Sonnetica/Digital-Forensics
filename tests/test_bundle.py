@@ -92,11 +92,61 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(report["saved_run"], self.latest["id"])
         rebuilt = Case(self.root / "rebuilt.db")
         self.assertEqual(rebuilt.run()["id"], self.latest["id"])
+        self.assertEqual(rebuilt.summary()["runs"], 2)
+        self.assertEqual(rebuilt.run(self.older["id"])["id"], self.older["id"])
         self.assertFalse(rebuilt.run_status()["stale"])
         audit = rebuilt.export()["audit"]
         imports = [row for row in audit if row["action"] == "import_bundle"]
         self.assertEqual(len(imports), 1)
         self.assertIn(self.summary["audit_head"], imports[0]["payload"])
+
+    def test_import_restores_run_saved_before_later_acquisition(self):
+        case = Case.create(self.root / "stale-original.db", "Earlier run")
+        case.ingest_bytes(raw_email("one"), "inbox/one.eml")
+        earlier = case.save_run(analyze(case.records()))
+        case.ingest_bytes(raw_email("two"), "inbox/two.eml")
+        bundle = self.root / "stale.zip"
+        export_bundle(case, bundle)
+
+        report = import_bundle(bundle, self.root / "stale-rebuilt.db")
+        rebuilt = Case(self.root / "stale-rebuilt.db")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["saved_run"], earlier["id"])
+        self.assertEqual(rebuilt.run()["id"], earlier["id"])
+        self.assertTrue(rebuilt.run_status()["stale"])
+        self.assertTrue(rebuilt.verify()["ok"])
+
+    def test_manifest_acquisition_must_match_export_and_audit(self):
+        def change_manifest(files, change_export):
+            manifest = json.loads(files["manifest.json"])
+            evidence_id = manifest["sources"][0]["sha256"]
+            manifest["sources"][0]["acquisitions"][0]["name"] = "forged/location.eml"
+            files["manifest.json"] = json.dumps(manifest).encode()
+            if change_export:
+                export = json.loads(files["case-export.json"])
+                record = next(item for item in export["evidence"] if item["id"] == evidence_id)
+                record["sources"][0]["name"] = "forged/location.eml"
+                files["case-export.json"] = json.dumps(export).encode()
+            files["SHA256SUMS"] = "".join(
+                f"{digest(data)}  {name}\n"
+                for name, data in sorted(files.items())
+                if name != "SHA256SUMS"
+            ).encode()
+
+        with self.assertRaisesRegex(ValueError, "disagree on acquisitions"):
+            import_bundle(
+                self.rewrite(lambda files: change_manifest(files, False)),
+                self.root / "manifest-mismatch.db",
+            )
+        self.assertFalse((self.root / "manifest-mismatch.db").exists())
+
+        report = import_bundle(
+            self.rewrite(lambda files: change_manifest(files, True)),
+            self.root / "audit-mismatch.db",
+        )
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["original_audit_chain_ok"])
+        self.assertTrue(any("acquisition" in error for error in report["original_audit_errors"]))
 
     def test_altered_source_or_unlisted_file_is_refused(self):
         def swap_source(files):

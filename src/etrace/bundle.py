@@ -174,10 +174,79 @@ def _read_bundle(path):
     return files
 
 
+def _check_bundle_metadata(export, manifest):
+    """Reject contradictory inventories before creating a rebuilt case."""
+    case = export["case"]
+    inventory = manifest["case"]
+    if any(case.get(key) != inventory.get(key) for key in ("name", "created_at", "audit_head")) or (
+        export["integrity"]["ok"] != inventory["integrity_ok"]
+    ):
+        raise ValueError("Bundle manifest and case export disagree on case metadata.")
+
+    evidence = {record["id"]: record for record in export["evidence"]}
+    sources = {entry["sha256"]: entry for entry in manifest["sources"]}
+    if (
+        len(evidence) != len(export["evidence"])
+        or len(sources) != len(manifest["sources"])
+        or set(evidence) != set(sources)
+    ):
+        raise ValueError("Bundle manifest and case export disagree on sources.")
+    for evidence_id, record in evidence.items():
+        entry = sources[evidence_id]
+        if (
+            record["sha256"] != evidence_id
+            or record["size"] != entry["size"]
+            or record["format"] != entry["format"]
+            or record["sources"] != entry["acquisitions"]
+        ):
+            raise ValueError("Bundle manifest and case export disagree on acquisitions.")
+
+    runs = {run["id"]: run for run in export["runs"]}
+    listed = {run["id"]: run for run in manifest["runs"]}
+    if (
+        len(runs) != len(export["runs"])
+        or len(listed) != len(manifest["runs"])
+        or set(runs) != set(listed)
+    ):
+        raise ValueError("Bundle manifest and case export disagree on analysis runs.")
+    active = case.get("active_run")
+    for run_id, run in runs.items():
+        entry = listed[run_id]
+        if any(
+            entry.get(key) != value
+            for key, value in (
+                ("application_version", run.get("application_version")),
+                ("rule_version", run.get("rule_version")),
+                ("parser_versions", run.get("parser_versions")),
+                ("findings_digest", findings_digest(run)),
+                ("active", run_id == active),
+            )
+        ):
+            raise ValueError("Bundle manifest and case export disagree on analysis runs.")
+
+
 def _check_original_audit(export, manifest, source_ids):
     """Recompute the original hash chain from the exported audit trail."""
     errors, previous = [], "0" * 64
     runs = {run["id"]: run for run in export["runs"]}
+    acquisitions = {
+        (record["id"], source["name"]): (
+            source["acquired_at"],
+            source["source_size"],
+            digest(
+                canonical(
+                    {
+                        key: value
+                        for key, value in record.items()
+                        if key not in ("sources", "analysis_record", "analysis_record_error")
+                    }
+                ).encode()
+            ),
+        )
+        for record in export["evidence"]
+        for source in record["sources"]
+    }
+    seen_acquisitions, seen_runs, last_run = set(), set(), None
     for expected_sequence, row in enumerate(export["audit"], 1):
         if row["sequence"] != expected_sequence:
             errors.append(f"Audit sequence gap at entry {row['sequence']}")
@@ -186,13 +255,30 @@ def _check_original_audit(export, manifest, source_ids):
         ):
             errors.append(f"Audit chain mismatch at entry {row['sequence']}")
         payload = json.loads(row["payload"])
-        if row["action"] == "ingest" and payload["evidence_id"] not in source_ids:
-            errors.append(f"Audit entry {row['sequence']} names evidence absent from the bundle")
+        if row["action"] == "ingest":
+            key = (payload["evidence_id"], payload["source"])
+            if payload["evidence_id"] not in source_ids:
+                errors.append(
+                    f"Audit entry {row['sequence']} names evidence absent from the bundle"
+                )
+            if key in seen_acquisitions or acquisitions.get(key) != (
+                payload.get("acquired_at"),
+                payload["size"],
+                payload["record_hash"],
+            ):
+                errors.append(f"Audit entry {row['sequence']} does not match an acquisition")
+            seen_acquisitions.add(key)
         if row["action"] == "analyze":
             run = runs.get(payload["run_id"])
             if run is None or digest(canonical(run).encode()) != payload["result_hash"]:
                 errors.append(f"Audit entry {row['sequence']} does not match a bundled run")
+            seen_runs.add(payload["run_id"])
+            last_run = payload["run_id"]
         previous = row["hash"]
+    if seen_acquisitions != set(acquisitions):
+        errors.append("Acquisition inventory does not match the audit trail.")
+    if seen_runs != set(runs) or export["case"].get("active_run") != last_run:
+        errors.append("Analysis inventory does not match the audit trail.")
     if previous != manifest["case"]["audit_head"] or previous != export["case"]["audit_head"]:
         errors.append("Audit head does not match the manifest.")
     for run in export["runs"]:
@@ -208,6 +294,7 @@ def import_bundle(bundle_path, case_path):
     export = json.loads(files[EXPORT])
     if manifest.get("bundle_version") != BUNDLE_VERSION:
         raise ValueError("Unsupported bundle version.")
+    _check_bundle_metadata(export, manifest)
     sources = {}
     for entry in manifest["sources"]:
         match = SOURCE_NAME.fullmatch(entry["path"])
@@ -230,13 +317,72 @@ def import_bundle(bundle_path, case_path):
     audit_errors = _check_original_audit(export, manifest, set(sources))
 
     case = Case.create(case_path, manifest["case"]["name"])
-    acquisitions = sorted(
-        (acquisition["acquired_at"], acquisition["name"], evidence_id)
-        for evidence_id, (_, entry) in sources.items()
-        for acquisition in entry["acquisitions"]
-    )
-    for _, name, evidence_id in acquisitions:
-        case.ingest_bytes(sources[evidence_id][0], name)
+    acquisition_count = sum(len(entry["acquisitions"]) for _, entry in sources.values())
+    active = export["case"].get("active_run")
+    created = {run["id"]: run.get("created_at") or "" for run in manifest["runs"]}
+    originals = {run["id"]: run for run in export["runs"]}
+    reports, reproduced, saved_run_id = [], {}, None
+    # Replay the original acquisition/analysis order. A run saved before later
+    # acquisitions must be saved while its original evidence set is current.
+    for row in export["audit"]:
+        payload = json.loads(row["payload"])
+        if row["action"] == "ingest":
+            case.ingest_bytes(sources[payload["evidence_id"]][0], payload["source"])
+        elif row["action"] == "analyze":
+            original = originals[payload["run_id"]]
+            if original["id"] not in reproduced:
+                report = {
+                    "original_run": original["id"],
+                    "created_at": created.get(original["id"]),
+                    "original_versions": {
+                        "application": original.get("application_version"),
+                        "rules": original.get("rule_version"),
+                        "parser": original.get("parser_versions"),
+                    },
+                }
+                reports.append(report)
+                comparable = original.get("rule_version") == RULE_VERSION and original.get(
+                    "parser_versions"
+                ) in ([PARSER_VERSION], [])
+                try:
+                    records = {record["id"]: record for record in case.records()}
+                    config = RuleConfig(**original["config"])
+                    result = analyze([records[i] for i in original["email_ids"]], config)
+                except (TypeError, ValueError, KeyError) as exc:
+                    report.update(
+                        reproduced=False, comparable=False, note=f"Could not re-run: {exc}"
+                    )
+                    reproduced[original["id"]] = (None, report)
+                    continue
+                report.update(
+                    reproduced=True,
+                    reproduced_run=result["id"],
+                    comparable=comparable,
+                    findings_match=findings_digest(result) == findings_digest(original),
+                    run_id_match=result["id"] == original["id"],
+                )
+                if not comparable:
+                    report["note"] = (
+                        f"Made with rules {original.get('rule_version')} and parser "
+                        f"{original.get('parser_versions')}; this E-TRACE uses rules {RULE_VERSION} and "
+                        f"parser {PARSER_VERSION}, so differences are expected."
+                    )
+                elif report["findings_match"] and not report["run_id_match"]:
+                    report["note"] = (
+                        "Findings match; the run ID differs because parsed records note the Python "
+                        "or library version used."
+                    )
+                reproduced[original["id"]] = (result, report)
+            result, report = reproduced[original["id"]]
+            if result is not None and report.get("findings_match"):
+                try:
+                    case.save_run(result)
+                except ValueError as exc:
+                    report["note"] = f"Could not restore run: {exc}"
+                else:
+                    report["restored_run"] = result["id"]
+                    if original["id"] == active:
+                        saved_run_id = result["id"]
     case.record_bundle_import(
         {
             "bundle_sha256": digest(Path(bundle_path).read_bytes()),
@@ -245,62 +391,16 @@ def import_bundle(bundle_path, case_path):
             "original_integrity_ok": manifest["case"]["integrity_ok"],
             "original_audit_chain_ok": not audit_errors,
             "sources": len(sources),
-            "acquisitions": len(acquisitions),
+            "acquisitions": acquisition_count,
         }
     )
-
-    records = {record["id"]: record for record in case.records()}
-    active = export["case"].get("active_run")
-    created = {run["id"]: run.get("created_at") or "" for run in manifest["runs"]}
-    reports, to_save = [], None
-    for original in sorted(export["runs"], key=lambda run: (created.get(run["id"], ""), run["id"])):
-        report = {
-            "original_run": original["id"],
-            "created_at": created.get(original["id"]),
-            "original_versions": {
-                "application": original.get("application_version"),
-                "rules": original.get("rule_version"),
-                "parser": original.get("parser_versions"),
-            },
-        }
-        reports.append(report)
-        comparable = original.get("rule_version") == RULE_VERSION and original.get(
-            "parser_versions"
-        ) in ([PARSER_VERSION], [])
-        try:
-            config = RuleConfig(**original["config"])
-            result = analyze([records[i] for i in original["email_ids"]], config)
-        except (TypeError, ValueError, KeyError) as exc:
-            report.update(reproduced=False, comparable=False, note=f"Could not re-run: {exc}")
-            continue
-        report.update(
-            reproduced=True,
-            reproduced_run=result["id"],
-            comparable=comparable,
-            findings_match=findings_digest(result) == findings_digest(original),
-            run_id_match=result["id"] == original["id"],
-        )
-        if not comparable:
-            report["note"] = (
-                f"Made with rules {original.get('rule_version')} and parser "
-                f"{original.get('parser_versions')}; this E-TRACE uses rules {RULE_VERSION} and "
-                f"parser {PARSER_VERSION}, so differences are expected."
-            )
-        elif report["findings_match"] and not report["run_id_match"]:
-            report["note"] = (
-                "Findings match; the run ID differs because parsed records note the Python "
-                "or library version used."
-            )
-        if original["id"] == active and set(original["email_ids"]) == set(records):
-            to_save = result
-    if to_save is not None:
-        case.save_run(to_save)
     comparable_runs = [r for r in reports if r.get("comparable")]
+    rebuilt_integrity_ok = case.verify()["ok"]
     return {
         "case": str(case.path),
         "original_case": manifest["case"]["name"],
         "sources_verified": len(sources),
-        "acquisitions": len(acquisitions),
+        "acquisitions": acquisition_count,
         "original_integrity_ok": manifest["case"]["integrity_ok"],
         "original_audit_chain_ok": not audit_errors,
         "original_audit_errors": audit_errors,
@@ -308,12 +408,15 @@ def import_bundle(bundle_path, case_path):
         "runs": reports,
         "runs_compared": len(comparable_runs),
         "runs_with_matching_findings": sum(bool(r.get("findings_match")) for r in reports),
-        "saved_run": to_save["id"] if to_save else None,
-        "rebuilt_integrity_ok": case.verify()["ok"],
+        "saved_run": saved_run_id,
+        "rebuilt_integrity_ok": rebuilt_integrity_ok,
         "ok": (
             not audit_errors
             and manifest["case"]["integrity_ok"]
+            and rebuilt_integrity_ok
             and all(r["findings_match"] for r in comparable_runs)
+            and all(r.get("restored_run") for r in reports)
+            and (active is None or saved_run_id is not None)
         ),
     }
 
